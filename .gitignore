@@ -1,0 +1,17 @@
+# Secretos: subir .env descuenta 5 décimas; subir un .pem significa que no se corrige la entrega.
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Sistema operativo / editores
+.DS_Store
+.idea/
+.vscode/
