@@ -1,0 +1,103 @@
+# Tests en cada PR y push; deploy a producción en cada push a main (RNF04).
+#
+# Flujo del deploy: build de la imagen → push a ECR → SSM ordena a la EC2 hacer pull y
+# levantar el stack. La EC2 nunca construye imágenes ni necesita acceso a GitHub.
+# Configuración en AWS y variables del repo: docs/infraestructura.md.
+name: CI / Deploy backend
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest httpx ruff
+      - run: ruff check .
+      - run: pytest
+
+  deploy:
+    needs: test
+    # Sin las variables de AWS configuradas, el deploy se salta en vez de fallar.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    # Dos deploys a la vez podrían dejar la EC2 con una mezcla de versiones.
+    concurrency:
+      group: deploy-backend
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # OIDC: GitHub obtiene credenciales temporales sin access keys guardadas
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build y push a ECR
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
+          docker build -t "$IMAGE" -t "$REGISTRY/$ECR_REPOSITORY:latest" .
+          docker push "$IMAGE"
+          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy en EC2 vía SSM
+        run: |
+          # El compose viaja dentro del comando para que la EC2 siempre use el de este commit.
+          COMPOSE_B64=$(base64 -w0 deploy/docker-compose.prod.yml)
+          COMPOSE="docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml"
+          jq -n \
+            --arg compose_b64 "$COMPOSE_B64" \
+            --arg image "$IMAGE" \
+            --arg compose "$COMPOSE" \
+            '{commands: [
+              "set -eu",
+              "cd /opt/energyshark",
+              "test -f .env || { echo \"falta /opt/energyshark/.env\"; exit 1; }",
+              "echo \($compose_b64) | base64 -d > docker-compose.prod.yml",
+              "echo BACKEND_IMAGE=\($image) > release.env",
+              "\($compose) pull",
+              "\($compose) up -d --wait --wait-timeout 180",
+              "docker image prune -f"
+            ]}' > commands.json
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${GITHUB_SHA::7}" \
+            --parameters file://commands.json \
+            --query Command.CommandId --output text)
+
+          # Espera hasta ~5 minutos; el waiter de la CLI se rinde antes de que termine un pull lento.
+          for _ in $(seq 1 60); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" \
+              --instance-id "$EC2_INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
+            case "$STATUS" in Pending|InProgress|Delayed) sleep 5 ;; *) break ;; esac
+          done
+
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$EC2_INSTANCE_ID" \
+            --query '[StandardOutputContent, StandardErrorContent]' --output text
+          echo "Estado del deploy: $STATUS"
+          test "$STATUS" = "Success"

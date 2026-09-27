@@ -1,0 +1,45 @@
+# Stack de producción en la EC2 (RNF04). A diferencia del compose local:
+# - usa imágenes de ECR (nunca `build:`); el tag lo escribe el deploy en release.env;
+# - limita memoria (t3.micro tiene 1 GB) y rota logs para no llenar el disco;
+# - publica la API solo en loopback: el tráfico externo entra por el host.
+#
+# El workflow de deploy copia este archivo a /opt/energyshark en cada despliegue.
+# Uso manual en la EC2:
+#   docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml up -d
+name: energyshark-e1
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:16-alpine
+    env_file: .env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    mem_limit: 256m
+    logging: *logging
+
+  api:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE no definida; la escribe el deploy en release.env}
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: always
+    mem_limit: 256m
+    logging: *logging
+
+volumes:
+  pgdata:
