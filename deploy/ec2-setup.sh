@@ -28,6 +28,15 @@ https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_C
 fi
 systemctl enable --now docker
 
+echo "=== Swap de 1 GB (t3.micro tiene ~900 MB de RAM y la AMI no trae swap) ==="
+if ! swapon --show | grep -q /swapfile; then
+    fallocate -l 1G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 echo "=== Docker autentica contra ECR con el rol de la instancia ==="
 # SSM ejecuta los deploys como root; ubuntu se configura para operar a mano.
 for home in /root /home/ubuntu; do
