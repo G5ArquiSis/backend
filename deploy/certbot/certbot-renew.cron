@@ -1,0 +1,14 @@
+# Chequeo de expiración del certificado SSL dos veces al día (parte variable).
+# certbot solo renueva de verdad si al certificado le quedan menos de 30 días.
+#
+#   sudo cp deploy/certbot/certbot-renew.cron /etc/cron.d/certbot-renew
+#   sudo chown root:root /etc/cron.d/certbot-renew
+#   sudo chmod 644 /etc/cron.d/certbot-renew
+#
+# El sleep aleatorio reparte la carga sobre Let's Encrypt en vez de golpearla en
+# punto junto a todos los demás clientes.
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+0 0,12 * * * root perl -e 'sleep int(rand(3600))' && certbot renew --quiet --deploy-hook "systemctl reload nginx"
