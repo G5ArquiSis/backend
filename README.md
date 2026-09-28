@@ -15,6 +15,9 @@ Repos relacionados (organización `G5ArquiSis`):
 - [`frontend`](https://github.com/G5ArquiSis/frontend): SPA en React.
 - [`contratos`](https://github.com/G5ArquiSis/contratos): schemas de mensajes, OpenAPI y contexto compartido.
 
+**Contexto compartido del proyecto:** [`contratos/AGENTS.md`](https://github.com/G5ArquiSis/contratos/blob/main/AGENTS.md).
+Leerlo antes de tocar el código: resume el sistema, los repositorios y las reglas que no se rompen.
+
 ## Correr en local
 
 Requiere Docker Compose v2 (`docker compose`, no `docker-compose`).
