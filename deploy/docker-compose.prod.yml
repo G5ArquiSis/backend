@@ -1,7 +1,8 @@
 # Stack de producción en la EC2 (RNF04 E1). A diferencia del compose local:
 # - usa imágenes de ECR (nunca `build:`); los tags los escribe el deploy en release.env;
 # - limita memoria (t3.micro tiene 1 GB) y rota logs para no llenar el disco;
-# - publica master solo en loopback: el tráfico externo entra por Nginx en el host.
+# - publica las réplicas de master solo en loopback: el tráfico externo entra por Nginx
+#   en el host, que las balancea (deploy/nginx/energyshark-tls.conf).
 #
 # El workflow de deploy copia este archivo a /opt/energyshark en cada despliegue.
 # Uso manual en la EC2:
@@ -13,6 +14,24 @@ x-logging: &logging
   options:
     max-size: "10m"
     max-file: "3"
+
+# master-1 y master-2 son la misma imagen con distinto puerto publicado (balanceo de
+# carga con Nginx, parte variable de la E0). El alias de red "master" lo comparten ambas
+# réplicas: el DNS de Docker reparte entre ellas las conexiones de connector a
+# http://master:8000 (round-robin).
+x-master-service: &master-service
+  image: ${MASTER_IMAGE:?MASTER_IMAGE no definida; la escribe el deploy en release.env}
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    energyshark:
+      aliases:
+        - master
+  restart: always
+  mem_limit: 256m
+  logging: *logging
 
 services:
   postgres:
@@ -31,26 +50,22 @@ services:
     mem_limit: 256m
     logging: *logging
 
-  # Los nombres "master" y "connector" los exige la E0 (RNF2).
-  master:
-    image: ${MASTER_IMAGE:?MASTER_IMAGE no definida; la escribe el deploy en release.env}
-    env_file: .env
+  # "master" (alias de red) y "connector" son los nombres que exige la E0 (RNF2).
+  master-1:
+    <<: *master-service
     ports:
-      - "127.0.0.1:8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - energyshark
-    restart: always
-    mem_limit: 256m
-    logging: *logging
+      - "127.0.0.1:8001:8000"
+
+  master-2:
+    <<: *master-service
+    ports:
+      - "127.0.0.1:8002:8000"
 
   connector:
     image: ${CONNECTOR_IMAGE:?CONNECTOR_IMAGE no definida; la escribe el deploy en release.env}
     env_file: .env
     depends_on:
-      master:
+      master-1:
         condition: service_healthy
     networks:
       - energyshark
