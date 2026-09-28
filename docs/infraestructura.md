@@ -52,6 +52,10 @@ push a main ─→ GitHub Actions (.github/workflows/deploy.yml)
 
 - Trust policy: [`deploy/iam/ci-backend-trust.json`](../deploy/iam/ci-backend-trust.json). Solo
   permite asumir el rol a workflows de `G5ArquiSis/backend` corriendo sobre `main`.
+  GitHub usa un `sub` **inmutable**, con los IDs numéricos de la organización y del repo
+  (`repo:G5ArquiSis@<id org>/backend@<id repo>:ref:refs/heads/main`). El prefijo exacto se obtiene con
+  `gh api repos/G5ArquiSis/<repo>/actions/oidc/customization/sub`; con el formato antiguo
+  (`repo:G5ArquiSis/backend:...`) AWS rechaza el token.
 - Permisos: crear una política inline con [`deploy/iam/ci-backend-policy.json`](../deploy/iam/ci-backend-policy.json)
   (push al repo ECR + enviar el comando de deploy solo a nuestra instancia).
 
