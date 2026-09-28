@@ -1,7 +1,7 @@
-# Stack de producción en la EC2 (RNF04). A diferencia del compose local:
-# - usa imágenes de ECR (nunca `build:`); el tag lo escribe el deploy en release.env;
+# Stack de producción en la EC2 (RNF04 E1). A diferencia del compose local:
+# - usa imágenes de ECR (nunca `build:`); los tags los escribe el deploy en release.env;
 # - limita memoria (t3.micro tiene 1 GB) y rota logs para no llenar el disco;
-# - publica la API solo en loopback: el tráfico externo entra por el host.
+# - publica master solo en loopback: el tráfico externo entra por Nginx en el host.
 #
 # El workflow de deploy copia este archivo a /opt/energyshark en cada despliegue.
 # Uso manual en la EC2:
@@ -15,11 +15,13 @@ x-logging: &logging
     max-file: "3"
 
 services:
-  db:
+  postgres:
     image: postgres:16-alpine
     env_file: .env
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - energyshark
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -29,17 +31,36 @@ services:
     mem_limit: 256m
     logging: *logging
 
-  api:
-    image: ${BACKEND_IMAGE:?BACKEND_IMAGE no definida; la escribe el deploy en release.env}
+  # Los nombres "master" y "connector" los exige la E0 (RNF2).
+  master:
+    image: ${MASTER_IMAGE:?MASTER_IMAGE no definida; la escribe el deploy en release.env}
     env_file: .env
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
+    networks:
+      - energyshark
     restart: always
     mem_limit: 256m
     logging: *logging
+
+  connector:
+    image: ${CONNECTOR_IMAGE:?CONNECTOR_IMAGE no definida; la escribe el deploy en release.env}
+    env_file: .env
+    depends_on:
+      master:
+        condition: service_healthy
+    networks:
+      - energyshark
+    restart: always
+    mem_limit: 128m
+    logging: *logging
+
+networks:
+  energyshark:
+    driver: bridge
 
 volumes:
   pgdata:

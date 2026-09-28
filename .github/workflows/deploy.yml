@@ -1,6 +1,6 @@
 # Tests en cada PR y push; deploy a producción en cada push a main (RNF04).
 #
-# Flujo del deploy: build de la imagen → push a ECR → SSM ordena a la EC2 hacer pull y
+# Flujo del deploy: build de master y connector → push a ECR → SSM ordena a la EC2 hacer pull y
 # levantar el stack. La EC2 nunca construye imágenes ni necesita acceso a GitHub.
 # Configuración en AWS y variables del repo: docs/infraestructura.md.
 name: CI / Deploy backend
@@ -56,7 +56,6 @@ jobs:
       id-token: write # OIDC: GitHub obtiene credenciales temporales sin access keys guardadas
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
-      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
       EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
     steps:
       - uses: actions/checkout@v4
@@ -69,15 +68,18 @@ jobs:
       - id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build y push a ECR
+      - name: Build y push a ECR (master y connector)
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
-          IMAGE="$REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
-          docker build -t "$IMAGE" -t "$REGISTRY/$ECR_REPOSITORY:latest" .
-          docker push "$IMAGE"
-          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
-          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          for service in master connector; do
+            REPO="$REGISTRY/energyshark-$service"
+            docker build -t "$REPO:$GITHUB_SHA" -t "$REPO:latest" "./$service"
+            docker push "$REPO:$GITHUB_SHA"
+            docker push "$REPO:latest"
+          done
+          echo "MASTER_IMAGE=$REGISTRY/energyshark-master:$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "CONNECTOR_IMAGE=$REGISTRY/energyshark-connector:$GITHUB_SHA" >> "$GITHUB_ENV"
 
       - name: Deploy en EC2 vía SSM
         run: |
@@ -86,16 +88,18 @@ jobs:
           COMPOSE="docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml"
           jq -n \
             --arg compose_b64 "$COMPOSE_B64" \
-            --arg image "$IMAGE" \
+            --arg master "$MASTER_IMAGE" \
+            --arg connector "$CONNECTOR_IMAGE" \
             --arg compose "$COMPOSE" \
             '{commands: [
               "set -eu",
               "cd /opt/energyshark",
               "test -f .env || { echo \"falta /opt/energyshark/.env\"; exit 1; }",
               "echo \($compose_b64) | base64 -d > docker-compose.prod.yml",
-              "echo BACKEND_IMAGE=\($image) > release.env",
+              "echo MASTER_IMAGE=\($master) > release.env",
+              "echo CONNECTOR_IMAGE=\($connector) >> release.env",
               "\($compose) pull",
-              "\($compose) up -d --wait --wait-timeout 180",
+              "\($compose) up -d --remove-orphans --wait --wait-timeout 180",
               "docker image prune -f"
             ]}' > commands.json
 

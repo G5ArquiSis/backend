@@ -8,7 +8,7 @@
       "Resource": "*"
     },
     {
-      "Sid": "EcrPushBackend",
+      "Sid": "EcrPushMasterYConnector",
       "Effect": "Allow",
       "Action": [
         "ecr:BatchCheckLayerAvailability",
@@ -18,7 +18,10 @@
         "ecr:PutImage",
         "ecr:UploadLayerPart"
       ],
-      "Resource": "arn:aws:ecr:REGION:ACCOUNT_ID:repository/energyshark-backend"
+      "Resource": [
+        "arn:aws:ecr:REGION:ACCOUNT_ID:repository/energyshark-master",
+        "arn:aws:ecr:REGION:ACCOUNT_ID:repository/energyshark-connector"
+      ]
     },
     {
       "Sid": "DeployViaSsm",
