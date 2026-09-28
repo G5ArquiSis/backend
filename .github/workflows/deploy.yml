@@ -83,11 +83,16 @@ jobs:
 
       - name: Deploy en EC2 vía SSM
         run: |
-          # El compose viaja dentro del comando para que la EC2 siempre use el de este commit.
+          # El compose y la config de Nginx viajan dentro del comando para que la EC2 siempre
+          # use los de este commit.
           COMPOSE_B64=$(base64 -w0 deploy/docker-compose.prod.yml)
+          NGINX_B64=$(base64 -w0 deploy/nginx/energyshark-tls.conf)
           COMPOSE="docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml"
+          SITE=/etc/nginx/sites-available/energyshark
           jq -n \
             --arg compose_b64 "$COMPOSE_B64" \
+            --arg nginx_b64 "$NGINX_B64" \
+            --arg site "$SITE" \
             --arg master "$MASTER_IMAGE" \
             --arg connector "$CONNECTOR_IMAGE" \
             --arg compose "$COMPOSE" \
@@ -100,6 +105,8 @@ jobs:
               "echo CONNECTOR_IMAGE=\($connector) >> release.env",
               "\($compose) pull",
               "\($compose) up -d --remove-orphans --wait --wait-timeout 180",
+              "echo \($nginx_b64) | base64 -d > /tmp/energyshark-nginx.conf",
+              "if ! cmp -s /tmp/energyshark-nginx.conf \($site); then cp \($site) \($site).prev; cp /tmp/energyshark-nginx.conf \($site); if nginx -t; then systemctl reload nginx; echo \"nginx actualizado\"; else cp \($site).prev \($site); echo \"nginx -t fallo: config anterior restaurada\"; exit 1; fi; else echo \"nginx sin cambios\"; fi",
               "docker image prune -f"
             ]}' > commands.json
 
