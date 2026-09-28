@@ -1,7 +1,14 @@
 # EnergyShark E1 — Backend
 
-API y nodo de ciudad para la E1 de IIC2173. Consume la cola `city.{CODE}` del broker del curso,
-mantiene el ledger de la ciudad, negocia con la central y expone una API JSON para el frontend.
+Nodo de ciudad para la E1 de IIC2173. Parte del código de la E0 (que la E1 exige mantener
+operativo): `master` expone la API HTTP y persiste en Postgres; `connector` consume del broker
+del curso y le envía los eventos a `master` por HTTP POST.
+
+| Servicio | Carpeta | Qué hace |
+|---|---|---|
+| `master` | [`master/`](master/) | FastAPI: `/history` (paginado y filtrable), `/history/{id}`, `POST /events`, `/health` |
+| `connector` | [`connector/`](connector/) | Consumidor AMQP con reconexión automática; `ack` solo tras persistir en `master` |
+| `postgres` | — | Base de datos |
 
 Repos relacionados (organización `G5ArquiSis`):
 
@@ -13,19 +20,22 @@ Repos relacionados (organización `G5ArquiSis`):
 Requiere Docker Compose v2 (`docker compose`, no `docker-compose`).
 
 ```bash
-cp .env.example .env        # completar valores
+cp .env.example .env        # completar credenciales del broker
 docker compose up --build
+docker compose ps           # los tres deben terminar (healthy)
 curl -i http://127.0.0.1:8000/health
+curl -i 'http://127.0.0.1:8000/history?page=1&limit=25'
 ```
 
 ## Tests y lint
 
-Usar Python 3.12 (igual que la imagen).
+Usar Python 3.12 (asyncpg no compila en 3.14).
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt pytest httpx ruff
-pytest
+pip install -r master/requirements.txt -r connector/requirements.txt pytest pytest-asyncio httpx ruff
+pytest                      # los tests de integración se saltan si no hay Postgres
+TEST_DATABASE_URL=postgresql+asyncpg://energyshark:changeme@localhost:5432/energyshark_test pytest
 ruff check .
 ```
 

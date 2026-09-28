@@ -1,11 +1,26 @@
-# Solo herramientas de desarrollo; no se copia a la imagen Docker.
-[tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
+# Configuración de herramientas de desarrollo únicamente.
+# Este archivo NO se copia dentro de las imágenes Docker: master y connector son
+# quanta independientes y cada uno declara sus dependencias de runtime en su
+# propio requirements.txt (ver CLAUDE.md, seccion 2).
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["master/tests", "connector/tests", "tests"]
+pythonpath = ["master", "connector"]
+# database.py construye el engine al importarse y su pool de asyncpg queda atado
+# al primer event loop que lo toca. Sin un loop compartido, el segundo test que
+# use la base falla con "Event loop is closed".
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+markers = ["integration: necesita un Postgres vivo (se salta si no hay)"]
+
+[tool.ruff.lint.isort]
+# Los módulos de connector viven en la raíz de su imagen, sin paquete contenedor.
+known-first-party = ["app", "config", "consumer", "events", "heartbeat", "master_client"]

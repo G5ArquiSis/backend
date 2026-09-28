@@ -1,4 +1,4 @@
-"""Configuración del backend, leída desde variables de entorno."""
+"""Configuración de master, leída desde variables de entorno."""
 
 from functools import lru_cache
 
@@ -6,10 +6,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Valores que el servicio necesita del entorno. Ver `.env.example`."""
+    """Valores que el servicio web necesita del entorno."""
 
     database_url: str
 
+    # El .env es compartido por los tres containers, así que las variables del
+    # broker llegan acá aunque master no las use.
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

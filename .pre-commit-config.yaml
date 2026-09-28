@@ -1,0 +1,26 @@
+# Global configurations
+default_stages: [pre-commit]
+fail_fast: false
+
+repos:
+  # 1. Standard Out-of-the-Box Hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: detect-private-key
+
+  # 2. Ruff: lint (con autofix, incluye import sorting via "I") + format.
+  # Mismas reglas que `pyproject.toml` ([tool.ruff]) para que pre-commit y
+  # `ruff check .` en local coincidan siempre.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format

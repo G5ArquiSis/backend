@@ -3,14 +3,15 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# curl es la herramienta con la que el HEALTHCHECK verifica el servicio.
+# curl es la herramienta con la que el HEALTHCHECK verifica el servicio (RNF7).
 RUN apt-get update \
     && apt-get install --no-install-recommends -y curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv
 
-# Las dependencias se copian antes que el código para reutilizar la caché de capas.
+# Las dependencias se copian antes que el código para reutilizar la caché de capas
+# cuando solo cambia el código.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

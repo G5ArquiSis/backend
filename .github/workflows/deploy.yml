@@ -17,12 +17,28 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Postgres real para que los tests de integración (JSONB, índice único de idpk,
+    # TIMESTAMPTZ) corran en CI en vez de saltarse.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: energyshark
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: energyshark_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U energyshark -d energyshark_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://energyshark:changeme@localhost:5432/energyshark_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pytest httpx ruff
+      - run: pip install -r master/requirements.txt -r connector/requirements.txt pytest pytest-asyncio httpx ruff
       - run: ruff check .
       - run: pytest
 
