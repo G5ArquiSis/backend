@@ -11,18 +11,21 @@ push a main ─→ GitHub Actions (.github/workflows/deploy.yml)
                     (tags: <sha del commit> y latest)
                  3. SSM ─→ EC2: copia deploy/docker-compose.prod.yml a /opt/energyshark,
                                 escribe MASTER_IMAGE y CONNECTOR_IMAGE en release.env,
-                                docker compose pull + up --remove-orphans --wait
+                                docker compose pull + up --remove-orphans --wait,
+                                instala deploy/nginx/energyshark-tls.conf si cambió (nginx -t + reload)
 
-internet ─→ Nginx en el host (TLS, melchort.me) ─→ 127.0.0.1:8000 master ─→ postgres
-                                    broker del curso ─→ connector ─→ POST /events a master
+internet ─→ Nginx en el host (TLS, melchort.me) ─→ 127.0.0.1:8001 master-1 ─┐
+                                     (least_conn) ─→ 127.0.0.1:8002 master-2 ─┴→ postgres
+     broker del curso ─→ connector ─→ POST http://master:8000/events (alias de ambas réplicas)
 ```
 
 - La EC2 **nunca** construye imágenes ni necesita acceso a GitHub (RNF04).
 - GitHub entra a AWS con **OIDC**: credenciales temporales, sin access keys guardadas en el repo.
 - La EC2 descarga desde ECR y recibe comandos de SSM con su **rol IAM**; tampoco guarda credenciales.
 - Si falta configurar las variables del repo, el workflow corre los tests y se salta el deploy.
-- Los requisitos no variables de la E0 siguen vigentes en la E1: contenedores `master` y
-  `connector` con HEALTHCHECK, Nginx en el host, `/history` paginado y filtrable.
+- Todo lo de la E0 sigue vigente en la E1: contenedores `master` y `connector` con HEALTHCHECK,
+  Nginx en el host, `/history` paginado y filtrable, y las dos partes variables (HTTPS con
+  renovación automática y balanceo de carga sobre dos réplicas de `master`).
 
 ## Supuestos
 
@@ -116,19 +119,25 @@ sudo chmod 640 /opt/energyshark/.env && sudo chown root:docker /opt/energyshark/
 ```bash
 cd /opt/energyshark
 sudo docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml ps
-curl -i http://127.0.0.1:8000/health
+curl -i http://127.0.0.1:8001/health
+curl -i http://127.0.0.1:8002/health
 ```
 
-Los tres contenedores (`postgres`, `master`, `connector`) deben quedar `(healthy)`.
+Los cuatro contenedores (`postgres`, `master-1`, `master-2`, `connector`) deben quedar `(healthy)`.
 
 ### 9. Nginx en el host (RNF3 de la E0)
 
 Nginx corre en la EC2, fuera de Docker, termina TLS con el certificado de Let's Encrypt de
-`melchort.me` y hace proxy a `master` en `127.0.0.1:8000`. Configs en
+`melchort.me` y balancea (`least_conn`) entre `master-1` (`127.0.0.1:8001`) y `master-2`
+(`127.0.0.1:8002`). Configs en
 [`deploy/nginx/`](../deploy/nginx/): `energyshark.conf` es solo HTTP (bootstrap, antes de que
 exista el certificado) y `energyshark-tls.conf` la final. Ambas van a la **misma** ruta,
 `/etc/nginx/sites-available/energyshark`; nunca enlazar las dos en `sites-enabled` (declaran el
 mismo `upstream`).
+
+El deploy instala `energyshark-tls.conf` automáticamente cuando cambia: valida con `nginx -t`,
+recarga, y si la validación falla restaura la config anterior (`energyshark.prev`) y marca el
+deploy como fallido. A mano:
 
 ```bash
 sudo cp deploy/nginx/energyshark-tls.conf /etc/nginx/sites-available/energyshark
@@ -144,9 +153,9 @@ Renovación: [`deploy/certbot/certbot-renew.cron`](../deploy/certbot/certbot-ren
 |---|---|
 | Desplegar | Merge a `main` |
 | Volver a una versión anterior | `git revert` + merge a `main`; en una emergencia, editar `release.env` en la EC2 con los tags anteriores y correr `up -d` |
-| Ver logs | `sudo docker compose ... logs -f master` (o `connector`) en `/opt/energyshark` |
+| Ver logs | `sudo docker compose ... logs -f master-1 master-2` (o `connector`) en `/opt/energyshark` |
 | Agregar una variable de entorno | Documentarla en `.env.example` (PR) y agregarla a mano en `/opt/energyshark/.env` **antes** del merge |
-| Cambiar la config de Nginx | Editar `deploy/nginx/energyshark-tls.conf` (PR) y copiarla al host a mano (paso 9); el CI no la despliega |
+| Cambiar la config de Nginx | Editar `deploy/nginx/energyshark-tls.conf` (PR); el deploy la instala |
 
 ## Pendiente
 

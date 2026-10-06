@@ -6,7 +6,7 @@ del curso y le envía los eventos a `master` por HTTP POST.
 
 | Servicio | Carpeta | Qué hace |
 |---|---|---|
-| `master` | [`master/`](master/) | FastAPI: `/history` (paginado y filtrable), `/history/{id}`, `POST /events`, `/health` |
+| `master-1`, `master-2` | [`master/`](master/) | Dos réplicas balanceadas por Nginx. FastAPI: `/history` (paginado y filtrable), `/history/{id}`, `POST /events`, `/health` |
 | `connector` | [`connector/`](connector/) | Consumidor AMQP con reconexión automática; `ack` solo tras persistir en `master` |
 | `postgres` | — | Base de datos |
 
@@ -25,9 +25,9 @@ Requiere Docker Compose v2 (`docker compose`, no `docker-compose`).
 ```bash
 cp .env.example .env        # completar credenciales del broker
 docker compose up --build
-docker compose ps           # los tres deben terminar (healthy)
-curl -i http://127.0.0.1:8000/health
-curl -i 'http://127.0.0.1:8000/history?page=1&limit=25'
+docker compose ps           # los cuatro deben terminar (healthy)
+curl -i http://127.0.0.1:8001/health      # master-1 (master-2 en 8002)
+curl -i 'http://127.0.0.1:8001/history?page=1&limit=25'
 ```
 
 ## Tests y lint

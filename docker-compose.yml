@@ -2,6 +2,22 @@
 # deploy/docker-compose.prod.yml.
 name: energyshark
 
+# master-1 y master-2 son la misma imagen con distinto puerto publicado (balanceo de
+# carga con Nginx, parte variable de la E0). El alias de red "master" lo comparten ambas
+# réplicas: el DNS de Docker reparte entre ellas las conexiones de connector a
+# http://master:8000 (round-robin).
+x-master-service: &master-service
+  build: ./master
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    energyshark:
+      aliases:
+        - master
+  restart: unless-stopped
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -17,24 +33,22 @@ services:
       timeout: 5s
       retries: 5
 
-  # El nombre "master" lo exige la E0 (RNF2), igual que "connector".
-  master:
-    build: ./master
-    env_file: .env
+  # "master" (alias de red) y "connector" son los nombres que exige la E0 (RNF2).
+  master-1:
+    <<: *master-service
     ports:
-      - "127.0.0.1:8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - energyshark
-    restart: unless-stopped
+      - "127.0.0.1:8001:8000"
+
+  master-2:
+    <<: *master-service
+    ports:
+      - "127.0.0.1:8002:8000"
 
   connector:
     build: ./connector
     env_file: .env
     depends_on:
-      master:
+      master-1:
         condition: service_healthy
     networks:
       - energyshark
