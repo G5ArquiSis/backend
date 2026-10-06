@@ -16,6 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY entrypoint.sh .
 
 RUN useradd --create-home --shell /usr/sbin/nologin energyshark
 USER energyshark
@@ -25,4 +26,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
+# El entrypoint antepone el agente de New Relic cuando hay license key (RNF05).
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
