@@ -14,10 +14,20 @@ push a main ─→ GitHub Actions (.github/workflows/deploy.yml)
                                 docker compose pull + up --remove-orphans --wait,
                                 instala deploy/nginx/energyshark-tls.conf si cambió (nginx -t + reload)
 
+frontend ─→ API Gateway (api.melchort.me, CORS) ─┐
+                                                 ▼
 internet ─→ Nginx en el host (TLS, melchort.me) ─→ 127.0.0.1:8001 master-1 ─┐
                                      (least_conn) ─→ 127.0.0.1:8002 master-2 ─┴→ postgres
      broker del curso ─→ connector ─→ POST http://master:8000/events (alias de ambas réplicas)
 ```
+
+## URLs de producción
+
+| URL | Qué es |
+|---|---|
+| https://api.melchort.me | La API, detrás de API Gateway (RNF01). Es la que usa el frontend |
+| https://melchort.me | El mismo backend, directo por Nginx. Se mantiene por la E0 y es el origen del gateway |
+| https://app.melchort.me | El frontend (ver el runbook del repo `frontend`) |
 
 - La EC2 **nunca** construye imágenes ni necesita acceso a GitHub (RNF04).
 - GitHub entra a AWS con **OIDC**: credenciales temporales, sin access keys guardadas en el repo.
@@ -147,6 +157,46 @@ sudo nginx -t && sudo systemctl reload nginx
 Renovación: [`deploy/certbot/certbot-renew.cron`](../deploy/certbot/certbot-renew.cron) en
 `/etc/cron.d/certbot-renew` (chequeo 00:00 y 12:00 UTC; `certbot.timer` desactivado a propósito).
 
+### 10. API Gateway con subdominio propio (RNF01)
+
+HTTP API `energyshark-api` en `us-east-2`, delante de Nginx. Se eligió HTTP API y no REST porque
+trae CORS y autorizador JWT nativos, sin Lambdas. Los comandos exactos están en
+[`deploy/api-gateway/crear.sh`](../deploy/api-gateway/crear.sh).
+
+| Pieza | Configuración |
+|---|---|
+| Integración | `HTTP_PROXY` hacia `https://melchort.me/{proxy}` |
+| Rutas | `GET`, `POST`, `PUT`, `PATCH` y `DELETE` sobre `/{proxy+}` |
+| Stage | `$default`, con auto-deploy y límite de 50 requests por segundo (ráfaga de 100) |
+| CORS | Orígenes `https://app.melchort.me`, `https://d1fglzovmxjg55.cloudfront.net` y `http://localhost:5173`; headers `Authorization` y `Content-Type` |
+| Dominio | `api.melchort.me`, regional, TLS 1.2 como mínimo, certificado de ACM en `us-east-2` |
+
+Tres cosas que no son obvias:
+
+- **No usar una ruta `ANY`.** Con `ANY /{proxy+}` el preflight `OPTIONS` se reenvía al backend, que
+  responde 405, y el navegador bloquea la llamada. Con rutas por método, `OPTIONS` no calza con
+  ninguna y lo responde el gateway con 204.
+- **El CORS vive solo en el gateway.** El backend no debe agregar `CORSMiddleware`: con el header
+  duplicado el navegador rechaza la respuesta.
+- **Un origen nuevo se agrega en el gateway**, no en el código (`aws apigatewayv2 update-api
+  --cors-configuration ...`).
+
+El dominio se configura en dos pasos, ambos con registros CNAME en el proveedor de DNS (Namecheap):
+
+1. Pedir el certificado en ACM con validación por DNS y agregar el CNAME de validación que entrega.
+   Ese registro no se borra: ACM lo usa para renovar.
+2. Crear el *custom domain*, mapearlo al stage y agregar el CNAME `api` hacia el dominio regional
+   que entrega API Gateway (`d-xxxx.execute-api.us-east-2.amazonaws.com`).
+
+Verificación:
+
+```bash
+curl -i https://api.melchort.me/health
+curl -i -X OPTIONS https://api.melchort.me/history \
+  -H 'Origin: https://app.melchort.me' -H 'Access-Control-Request-Method: GET'
+# 204 con access-control-allow-origin: https://app.melchort.me
+```
+
 ## Operación
 
 | Tarea | Cómo |
@@ -156,10 +206,14 @@ Renovación: [`deploy/certbot/certbot-renew.cron`](../deploy/certbot/certbot-ren
 | Ver logs | `sudo docker compose ... logs -f master-1 master-2` (o `connector`) en `/opt/energyshark` |
 | Agregar una variable de entorno | Documentarla en `.env.example` (PR) y agregarla a mano en `/opt/energyshark/.env` **antes** del merge |
 | Cambiar la config de Nginx | Editar `deploy/nginx/energyshark-tls.conf` (PR); el deploy la instala |
+| Agregar un endpoint | Nada en el gateway: las rutas `/{proxy+}` lo cubren |
+| Permitir un origen nuevo en CORS | `aws apigatewayv2 update-api --cors-configuration ...` y actualizar `deploy/api-gateway/crear.sh` (PR) |
 
 ## Pendiente
 
-- API Gateway con subdominio, CORS y autorizador JWT (RNF01, RNF02); su integración apunta a
-  `https://melchort.me`.
+- Autorizador JWT de Auth0 en las rutas del gateway (RNF02); requiere el issuer y la audience del
+  tenant.
+- Impedir que las rutas de la E1 se llamen por `https://melchort.me` saltándose el gateway (header
+  secreto que agrega el gateway y que Nginx exige). Las rutas de la E0 siguen públicas.
 - New Relic APM + infraestructura (G07, RNF05).
 - Cerrar el puerto 22 del security group cuando todo se opere por SSM.

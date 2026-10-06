@@ -97,3 +97,27 @@ archivos, ejecutó los comandos de AWS y GitHub y abrió los PRs. Los commits co
 - **Verificación:** revisión de los enlaces entre documentos.
 - **Correcciones del integrante:** <!-- completar al revisar la propuesta -->
 - **Referencia:** rama `docs/formato-ai-logs` en los tres repos.
+
+## 2026-10-06 — API Gateway y subdominios
+
+- **Herramienta y modo:** Claude Code, Claude Opus 5.5, agéntico.
+- **Tarea:** poner la API detrás de API Gateway con subdominio propio y CORS (RNF01).
+- **Prompts relevantes:**
+  > "Que hay que hacer con api gateway"
+
+  > "no deberia usar un subdominio para la api y otro para el frontend"
+
+  > "Pide los dos certificados y pásame los registros"
+
+  > "sigamos. Todo esto es requuerido por el enunciado?"
+
+  > "Prepara la documentacion sin hacer commit"
+- **Qué produjo la IA:** en AWS, el certificado de ACM, la HTTP API `energyshark-api` con su
+  integración, rutas, CORS y límite de requests, y el dominio `api.melchort.me`. En el repo,
+  `deploy/api-gateway/crear.sh` y la sección 10 de `docs/infraestructura.md`.
+- **Verificación:** por `https://api.melchort.me`, `/health` y `/history` responden 200 y un id
+  inexistente 404; el preflight de CORS responde 204 para los orígenes permitidos. La primera
+  versión usaba una ruta `ANY` y el preflight devolvía 405; se corrigió con rutas por método.
+- **Correcciones del integrante:** propuse el subdominio para el frontend, que la IA había dejado
+  como opcional, y agregué a mano los cuatro registros DNS en Namecheap.
+- **Referencia:** rama `docs/api-gateway-dominios`.
