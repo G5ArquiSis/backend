@@ -1,0 +1,49 @@
+{
+  "common-elements": {
+    "idpk": "UUID",
+    "msgId": "UUID",
+    "type": "string",
+    "timestamp": "ISO 8601",
+    "cityId": "TAL"
+  },
+
+  "negotiation-proposal": {
+    "type": "negotiation-proposal",
+    "cycleId": "cycle-1234",
+    "data": {
+      "direction": "take | give",
+      "quantity": "number",
+      "pricePerEnergy": "number"
+    }
+  },
+
+  "give | take": {
+    "type": "give | take",
+    "cycleId": "cycle-1234",
+    "data": {
+      "target": "UUID",
+      "energy": "number",
+      "pricePerEnergy": "number"
+    }
+  },
+
+  "transfer": {
+    "type": "transfer",
+    "cycleId": "cycle-1234",
+    "data": {
+      "becauseOf": "UUID",
+      "quantity": "number"
+    }
+  },
+
+  "error": {
+    "type": "error",
+    "cycleId": "cycle-1234",
+    "reason": "CYCLE_UNKNOWN | CYCLE_EXPIRED | PRICE_ABOVE_CAP | OVER_CAPACITY | REPORT_TOO_EARLY",
+    "code": "number",
+    "data" : {
+      "target": "UUID",
+      "message": "string"
+    }
+  }
+}
