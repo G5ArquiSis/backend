@@ -121,3 +121,27 @@ archivos, ejecutó los comandos de AWS y GitHub y abrió los PRs. Los commits co
 - **Correcciones del integrante:** propuse el subdominio para el frontend, que la IA había dejado
   como opcional, y agregué a mano los cuatro registros DNS en Namecheap.
 - **Referencia:** rama `docs/api-gateway-dominios`.
+
+## 2026-10-06 — Monitoreo con New Relic
+
+- **Herramienta y modo:** Claude Code, Claude Opus 5.5, agéntico.
+- **Tarea:** instalar monitoreo SaaS: APM en `master` y agente de infraestructura en la EC2 (G07,
+  RNF05), y documentar cómo replicarlo (RDOC03).
+- **Prompts relevantes:**
+  > "Ya cree la cuenta de New Relic y tengo la key"
+
+  > "Ya cargue la key, responde 1"
+
+  > "Aparece el host. Ya subi la branch, abre el pr."
+- **Qué produjo la IA:** `master/entrypoint.sh` y los cambios en el `Dockerfile` y
+  `requirements.txt` de `master`; `deploy/newrelic-infra-setup.sh`; el paso del CI que construye la
+  imagen de `master` y prueba que arranque bajo el agente; `docs/monitoreo.md`. En la EC2, la
+  instalación del agente de infraestructura.
+- **Verificación:** el agente de infraestructura quedó activo y el host aparece en New Relic. En
+  el CI, la imagen de `master` responde `/health` bajo el agente con una key falsa. La primera
+  versión del script de instalación falló por los permisos del keyring de apt y se corrigió. El
+  APM en producción se verifica después del merge.
+- **Correcciones del integrante:** creé la cuenta de New Relic y cargué la license key
+  directamente en el `.env` de la EC2, sin pasarla por la IA ni por el repo; confirmé en el panel
+  que el host reporta.
+- **Referencia:** PR #5.

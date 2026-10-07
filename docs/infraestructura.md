@@ -215,5 +215,6 @@ curl -i -X OPTIONS https://api.melchort.me/history \
   tenant.
 - Impedir que las rutas de la E1 se llamen por `https://melchort.me` saltándose el gateway (header
   secreto que agrega el gateway y que Nginx exige). Las rutas de la E0 siguen públicas.
-- New Relic APM + infraestructura (G07, RNF05).
+- APM de New Relic en `master` (RNF05), en el PR #5. El agente de infraestructura ya está instalado
+  en la EC2 (G07).
 - Cerrar el puerto 22 del security group cuando todo se opere por SSM.
