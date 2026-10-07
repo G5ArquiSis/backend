@@ -4,3 +4,4 @@ sqlalchemy[asyncio]>=2.0,<2.1
 asyncpg>=0.30,<0.31
 pydantic>=2.9,<3.0
 pydantic-settings>=2.6,<3.0
+newrelic>=13.6,<14

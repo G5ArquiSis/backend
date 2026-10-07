@@ -41,6 +41,22 @@ jobs:
       - run: pip install -r master/requirements.txt -r connector/requirements.txt pytest pytest-asyncio httpx ruff
       - run: ruff check .
       - run: pytest
+      # La imagen de master arranca bajo el agente de New Relic: se prueba acá, con una key
+      # falsa, para que un entrypoint roto falle en el PR y no en el deploy a producción.
+      - name: Smoke test de la imagen de master
+        run: |
+          docker build -t master-smoke ./master
+          docker run -d --name master-smoke --network host \
+            -e DATABASE_URL="$TEST_DATABASE_URL" \
+            -e NEW_RELIC_LICENSE_KEY=0000000000000000000000000000000000000000 \
+            -e NEW_RELIC_APP_NAME=ci-smoke \
+            master-smoke
+          for i in $(seq 1 20); do
+            if curl -fs http://127.0.0.1:8000/health; then exit 0; fi
+            sleep 2
+          done
+          docker logs master-smoke
+          exit 1
 
   deploy:
     needs: test
