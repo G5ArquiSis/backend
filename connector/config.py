@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     heartbeat_path: Path = Path("/tmp/connector-heartbeat")
     heartbeat_max_age_seconds: float = 120
 
+    city_code: str
+
     # El .env es compartido por los tres containers, así que las variables de
     # Postgres llegan acá aunque connector no las use.
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

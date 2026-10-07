@@ -11,134 +11,154 @@ Política de ack, que es lo que sostiene RNF1:
   - POST confirmado -> ack y refresco de la señal de vida.
 """
 
-import asyncio
-import contextlib
+
+import time
+import json
 import logging
-import signal
-
-import aio_pika
-from aio_pika.abc import AbstractIncomingMessage, AbstractRobustConnection
-
+from typing import Any, Dict
+import pika
+import ssl
 from config import get_settings
-from events import DemandEventMessage, MalformedEventError, parse_demand_event
-from heartbeat import record_heartbeat
-from master_client import MasterClient, MasterUnavailableError
+from master_client import MasterClient
+from events import validacion_mensaje_entrante, construir_mensaje_ack
+
 
 logger = logging.getLogger(__name__)
 
 
-async def main() -> None:
-    """Levanta el consumidor y lo mantiene vivo hasta recibir la señal de apagado."""
-    logging.basicConfig(level=logging.INFO)
+def publicar_mensaje_broker(
+        channel: pika.adapters.blocking_connection.BlockingChannel,
+        payload: Dict[str, Any],
+        city_code: str,
+        routing_key: str = "central"):
 
-    shutdown = asyncio.Event()
-    install_shutdown_handlers(shutdown)
+    body_codificado = json.dumps(payload).encode("utf-8")
 
-    heartbeat_task = asyncio.create_task(refresh_heartbeat_while_running(shutdown))
-    try:
-        await run_until_shutdown(shutdown)
-    finally:
-        heartbeat_task.cancel()
+    properties = pika.BasicProperties(
+        content_type="application/json",
+        delivery_mode=2,
+        # user_id se envía como parametro del publish, no como parte del body
+        user_id=f"city.{city_code}",
+    )
 
+    channel.basic_publish(
+        exchange="",
+        routing_key=routing_key,
+        body=body_codificado,
+        properties=properties,
+    )
 
-async def run_until_shutdown(shutdown: asyncio.Event) -> None:
-    """Reintenta conectarse al broker indefinidamente, con backoff exponencial.
-
-    Perder el broker nunca debe terminar el proceso (RNF1): esta función es la
-    que garantiza que el connector se recupere sin intervención manual, incluso
-    si el broker está caído desde el arranque.
-    """
-    settings = get_settings()
-    client = MasterClient()
-    delay = settings.reconnect_initial_delay_seconds
-
-    try:
-        while not shutdown.is_set():
-            try:
-                connection = await aio_pika.connect_robust(settings.broker_url)
-            except Exception:
-                logger.exception("No se pudo conectar al broker, reintentando en %.1fs", delay)
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(shutdown.wait(), timeout=delay)
-                delay = min(delay * 2, settings.reconnect_max_delay_seconds)
-                continue
-
-            delay = settings.reconnect_initial_delay_seconds
-            async with connection:
-                consume_task = asyncio.create_task(consume_queue(connection, client))
-                shutdown_task = asyncio.create_task(shutdown.wait())
-                done, pending = await asyncio.wait(
-                    {consume_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in pending:
-                    task.cancel()
-                if consume_task in done:
-                    exc = consume_task.exception()
-                    if exc is not None:
-                        logger.exception("Se perdió la conexión al broker", exc_info=exc)
-    finally:
-        await client.aclose()
+    logger.info(
+        f"Publicado mensaje type={payload.get('type')} msgId={payload.get('msgId')}"
+    )
 
 
-async def consume_queue(connection: AbstractRobustConnection, client: MasterClient) -> None:
-    """Consume la cola del observer hasta que la conexión se caiga."""
-    settings = get_settings()
-    channel = await connection.channel()
-    await channel.set_qos(prefetch_count=10)
-    queue = await channel.get_queue(settings.broker_queue)
+def procesar_mensaje_y_responder(
+        canal: pika.adapters.blocking_connection.BlockingChannel,
+        body: bytes,
+        master_client: MasterClient,
+        city_code: str):
 
-    async with queue.iterator() as queue_iter:
-        async for message in queue_iter:
-            await handle_message(message, client)
+    mensaje, mensaje_nack, razon_descarte = validacion_mensaje_entrante(body)
 
+    # mensaje no parseable o sin msgId
+    if razon_descarte != None:
+        logger.warning(f"Mensaje descartado: {razon_descarte}")
 
-async def handle_message(message: AbstractIncomingMessage, client: MasterClient) -> None:
-    """Procesa un mensaje y decide su ack según la política del módulo."""
-    try:
-        event: DemandEventMessage = parse_demand_event(message.body)
-    except MalformedEventError:
-        logger.exception("Mensaje descartado: no corresponde a un evento demand-set válido")
-        await message.ack()
+        # en este caso no hay nack, entonces no hay que mandar nada al broker
+        # hay que registrar el log
+
+        master_client.record_log(
+            category="discarded",
+            raw_content=body.decode("utf-8", errors="replace"),
+            reason=razon_descarte,
+        )
+
         return
 
-    try:
-        await client.publish_event(event)
-    except MasterUnavailableError:
-        logger.exception("master no confirmó el evento %s, reencolando", event.idpk)
-        await message.nack(requeue=True)
+    # mensaje que si envían nack
+    if mensaje_nack != None:
+
+        logger.warning(f"Enviando NACK por {mensaje_nack.get('reason')}")
+
+        # hay que enviar el nack al broker para que reencole el mensaje
+        publicar_mensaje_broker(canal, mensaje_nack, city_code)
+
         return
 
-    await message.ack()
-    record_heartbeat()
+    # mensaje valido, que tiene que enviar un ack
+    msg_type_origen = mensaje.get("type")
+    msg_id_origen = mensaje.get("msgId")
+
+    # para no responder con un ack a un ack, nack o error
+    if msg_type_origen not in ["ack", "nack", "error"]:
+
+        mensaje_ack = construir_mensaje_ack(msg_id_origen, city_code)
+        publicar_mensaje_broker(canal, mensaje_ack, city_code)
 
 
-async def refresh_heartbeat_while_running(shutdown: asyncio.Event) -> None:
-    """Refresca la señal de vida mientras el proceso siga corriendo.
+def conectar_broker(settings, master_client: MasterClient, nombre_cola: str):
 
-    No basta con tocarla al procesar mensajes: una cola sin tráfico dejaría el
-    container marcado como unhealthy aunque el connector esté perfectamente vivo.
+    logger.info(
+        f"Conectando a RabbitMQ en {settings.broker_host}:{settings.broker_port}..."
+    )
 
-    Deliberadamente no mira el estado de la conexión al broker. El healthcheck
-    responde por connector, no por RabbitMQ: si el broker se cae, connector sigue
-    sano reintentando (RNF1) y marcar el container como unhealthy por una caída
-    ajena solo haría que Docker lo reiniciara sin motivo.
-    """
-    while not shutdown.is_set():
-        record_heartbeat()
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(shutdown.wait(), timeout=30)
+    ssl_context = ssl.create_default_context()
+
+    credenciales = pika.PlainCredentials(
+        settings.broker_user, settings.broker_password)
+
+    parametros = pika.ConnectionParameters(
+        host=settings.broker_host,
+        port=settings.broker_port,
+        virtual_host=settings.broker_vhost,
+        credentials=credenciales,
+        heartbeat=30,
+        blocked_connection_timeout=60,
+        ssl_options=pika.SSLOptions(ssl_context)
+    )
+
+    conexion_broker = pika.BlockingConnection(parametros)
+    canal = conexion_broker.channel()
+
+    canal.queue_declare(queue=nombre_cola, durable=True)
+    canal.basic_qos(prefetch_count=10)
+
+    logger.info(f"Escuchando cola {nombre_cola}")
+
+    for method_frame, properties, body in canal.consume(nombre_cola):
+        try:
+            procesar_mensaje(canal, body, master_client, settings.city_code)
+            canal.basic_ack(delivery_tag=method_frame.delivery_tag)
+            # notifica al broker que el mensaje ya fue leido y retirado de la cola
+
+        except Exception as err:
+            logger.error(f"Falla procesando mensaje: {err}")
+            canal.basic_ack(delivery_tag=method_frame.delivery_tag)
+            # notifica al broker que el mensaje ya fue leido y retirado de la cola
 
 
-def install_shutdown_handlers(shutdown: asyncio.Event) -> None:
-    """Conecta SIGTERM y SIGINT al apagado ordenado.
+def iniciar_broker():
 
-    Va desde el principio y no como idea de último momento: sin esto, un
-    `docker compose down` mataría el proceso dejando mensajes sin ack.
-    """
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown.set)
+    settings = get_settings()
+    master_client = MasterClient(settings.master_events_url)
+    nombre_cola = f"city.{settings.city_code}"
+
+    while True:
+        try:
+            conectar_broker(settings, master_client, nombre_cola)
+
+        except pika.exceptions.AMQPConnectionError as e:
+            logger.error(
+                f"Conexión con RabbitMQ perdida: {e}. Reintentando en 5 segundos...")
+            time.sleep(5)
+
+        except Exception as e:
+            logger.exception(
+                f"Error inesperado en consumer: {e}. Reintentando en 5 segundos...")
+            time.sleep(5)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logging.basicConfig(level=logging.INFO)
+    iniciar_broker()

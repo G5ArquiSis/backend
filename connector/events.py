@@ -6,10 +6,136 @@ es el nombre y el tipo de cada campo del JSON — nunca su orden ni un algoritmo
 compartido.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
+
+import json
+import uuid
+
+
+VALID_TYPES = {
+    "ack",
+    "nack",
+    "error",
+    "status-statement",
+    "transfer",
+    "demand-statement",
+    "distance-table",
+    "give",
+    "take",
+    "negotiation-proposal",
+    "negotiation-report",
+    "request",
+}
+
+
+def construir_mensaje_ack(msg_id_origen: str, city_code: str):
+
+    mensaje_ack = {
+        # se genera un nuevo y aleatoria idpk para el mensaje de ack, ya que es un mensaje independiente
+        "idpk": str(uuid.uuid4()),
+        "msgId": str(uuid.uuid4()),
+        "type": "ack",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cityId": city_code,
+        "data": {
+            "target": msg_id_origen
+        }
+    }
+
+    return mensaje_ack
+
+
+def construir_mensaje_nack(target, reason, code, mensaje, cycle_id: Optional[str] = None):
+
+    diccionario_data = {
+        "target": target,
+        "message": mensaje
+    }
+
+    if cycle_id != None:
+        diccionario_data["cycleId"] = cycle_id
+
+    mensaje_nack = {
+        # se genera un nuevo y aleatoria idpk para el mensaje de nack, ya que es un mensaje independiente
+        "idpk": str(uuid.uuid4()),
+        "msgId": str(uuid.uuid4()),
+        "type": "nack",
+        "reason": reason,
+        "code": code,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "data": diccionario_data
+    }
+
+    return mensaje_nack
+
+
+def validacion_mensaje_entrante(body):
+
+    # Retorna: (msg_dict, nack_dict, discard_reason)
+    # Si el mensaje se descarta (invalido) se retorna (None, None, "razón de descarte")
+    # Si el mensaje no tiene los 4 atributos validos es un nack, se retorna (None, nack, None)
+    # Si el mensaje es valido se retorna el json del evento (mensaje, None, None)
+
+    try:
+        data = json.loads(body.decode("utf-8"))
+
+    except Exception as e:
+        # caso en que el mensaje no puede parsearse como JSON, se descarta sin NACK porque no hay msgId al que responder
+        # hay que registrarlo en el log
+        return (None, None, f"JSON no parseable: {e}")
+
+    if not isinstance(data, dict):
+        return (None, None, "Envelope no es un objeto JSON")
+
+    msg_id = data.get("msgId")
+
+    if not msg_id or not isinstance(msg_id, str):
+        # caso en el que el mensaje no incluye msgId. Tambien se descarta sin NACK y se registra en el log
+        mensaje = "Mensaje no incluye msgId"
+        return (None, None, mensaje)
+
+    # casos en que el mensaje si puede parsearse como json y tiene un msgid
+    idpk = data.get("idpk")
+    msg_type = data.get("type")
+    timestamp = data.get("timestamp")
+
+    # 1. Chequeo de campos obligatorios
+    if not idpk or not msg_type or not timestamp or "data" not in data:
+
+        # se envía un nack al msgId del mensaje recibido, indicando que el mensaje es inválido
+        target = msg_id
+        reason = "MALFORMED_MESSAGE"
+        code = 422
+        mensaje = "Faltan campos obligatorios en el envelope (idpk, msgId, type, timestamp)"
+        cycle_id = data.get("cycleId")
+
+        return (None, construir_mensaje_nack(target, reason, code, mensaje, cycle_id), None)
+
+    # 2. idpk equals msgId
+    if idpk == msg_id:
+
+        target = msg_id
+        reason = "IDPK_EQUALS_MSGID"
+        code = 422
+        mensaje = "idpk no puede ser idéntico a msgId"
+        cycle_id = data.get("cycleId")
+
+        return (None, construir_mensaje_nack(target, reason, code, mensaje, cycle_id), None)
+
+    # 3. Validar tipo del mensaje
+    if msg_type not in VALID_TYPES:
+        target = msg_id
+        reason = "UNKNOWN_TYPE"
+        code = 400
+        mensaje = f"Este mensaje es de type desconocido: {msg_type}"
+        cycle_id = data.get("cycleId")
+
+        return (None, construir_mensaje_nack(target, reason, code, mensaje, cycle_id), None)
+
+    return (data, None, None)
 
 
 class MalformedEventError(Exception):
