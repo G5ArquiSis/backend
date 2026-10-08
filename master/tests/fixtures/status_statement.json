@@ -1,0 +1,15 @@
+{
+  "idpk": "stat-uuid-001",
+  "msgId": "msg-stat-001",
+  "type": "status-statement",
+  "cycleId": "cycle-100",
+  "timestamp": "2026-09-01T12:00:00Z",
+  "data": {
+    "energy": {
+      "generationCapacity": 1200000,
+      "consumption": 1400000,
+      "generationCost": 200.0
+    },
+    "validUntil": "2026-09-01T14:20:00Z"
+  }
+}

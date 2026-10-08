@@ -1,0 +1,13 @@
+{
+  "idpk": "dem-pos-uuid-003",
+  "msgId": "msg-dem-003",
+  "type": "demand-statement",
+  "cycleId": "cycle-100",
+  "timestamp": "2026-09-01T12:15:00Z",
+  "data": {
+    "balance": {
+      "quantity": 1000,
+      "valuePerKwh": 200.0
+    }
+  }
+}

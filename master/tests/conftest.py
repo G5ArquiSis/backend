@@ -65,6 +65,11 @@ async def session(database: None) -> AsyncIterator[AsyncSession]:
     puedan afirmar sobre valores concretos.
     """
     async with _session_factory() as database_session:
-        await database_session.execute(text("TRUNCATE demand_events RESTART IDENTITY"))
+        await database_session.execute(
+            text(
+                "TRUNCATE demand_events, ledger_events, voluntary_negotiations, "
+                "duplicate_messages, cycle_ledger RESTART IDENTITY CASCADE"
+            )
+        )
         await database_session.commit()
         yield database_session
