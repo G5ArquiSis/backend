@@ -1,4 +1,9 @@
-"""Modelo persistente de master (capa de datos)."""
+"""Modelo persistente de master (capa de datos).
+
+Define los modelos de persistencia para el ledger de ciclos, eventos contables,
+duplicados y negociaciones voluntarias (ADR-0002 / E1), preservando además
+DemandEvent para compatibilidad con la E0.
+"""
 
 from datetime import datetime
 from decimal import Decimal
@@ -13,7 +18,7 @@ class Base(DeclarativeBase):
 
 
 class DemandEvent(Base):
-    """Un evento demand-set del broker, tal como queda guardado.
+    """Un evento demand-set del broker, tal como queda guardado (heredado de E0).
 
     El array `demands` se guarda como JSONB en vez de aplanarse en filas por
     ciudad para que `idpk` siga siendo único por fila: así un reintento del
@@ -188,3 +193,8 @@ class DistanceTable(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+# Alias de compatibilidad
+DuplicateMessage = MessageLog
+VoluntaryNegotiation = Negotiation

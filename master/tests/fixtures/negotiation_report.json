@@ -1,0 +1,11 @@
+{
+  "idpk": "rep-uuid-005",
+  "msgId": "msg-rep-005",
+  "type": "negotiation-report",
+  "cycleId": "cycle-100",
+  "timestamp": "2026-09-01T13:56:00Z",
+  "data": {
+    "budgetBalance": 405000.0,
+    "energyBalance": 500
+  }
+}

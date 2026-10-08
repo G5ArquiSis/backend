@@ -1,0 +1,13 @@
+{
+  "idpk": "dem-neg-uuid-004",
+  "msgId": "msg-dem-004",
+  "type": "demand-statement",
+  "cycleId": "cycle-100",
+  "timestamp": "2026-09-01T12:30:00Z",
+  "data": {
+    "balance": {
+      "quantity": -500,
+      "valuePerKwh": 210.0
+    }
+  }
+}

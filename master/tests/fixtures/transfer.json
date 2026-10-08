@@ -1,0 +1,11 @@
+{
+  "idpk": "trans-uuid-002",
+  "msgId": "msg-trans-002",
+  "type": "transfer",
+  "cycleId": "cycle-100",
+  "timestamp": "2026-09-01T12:01:00Z",
+  "data": {
+    "quantity": 500000.0,
+    "penalty": 0.0
+  }
+}
