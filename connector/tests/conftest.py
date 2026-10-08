@@ -9,9 +9,8 @@ hacer lo mismo sin instalar el paquete.
 
 import os
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -26,12 +25,15 @@ os.environ.setdefault("BROKER_USER", "observer")
 os.environ.setdefault("BROKER_PASSWORD", "secret")
 os.environ.setdefault("BROKER_QUEUE", "observer.test.q")
 os.environ.setdefault("MASTER_EVENTS_URL", "http://master.test/events")
+os.environ.setdefault("HEARTBEAT_PATH", "/tmp/connector-heartbeat-tests")
 
 from master_client import MasterClient  # noqa: E402
 
+Handler = Callable[[httpx.Request], httpx.Response]
+
 
 @pytest.fixture
-def master_transport_factory() -> Any:
+def master_with() -> Callable[[Handler], MasterClient]:
     """Fábrica de un MasterClient cuyo HTTP va a un handler en memoria, sin red.
 
     httpx.MockTransport intercepta al nivel de transporte: master_client.py no se
@@ -39,24 +41,9 @@ def master_transport_factory() -> Any:
     producción hasta el punto exacto donde termina la responsabilidad del cliente.
     """
 
-    def build(handler: Any) -> MasterClient:
+    def build(handler: Handler) -> MasterClient:
         client = MasterClient()
-        client._client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), base_url="http://master.test"
-        )
+        client._client = httpx.Client(transport=httpx.MockTransport(handler))
         return client
 
     return build
-
-
-@pytest.fixture
-async def master_client_ok() -> AsyncIterator[MasterClient]:
-    """MasterClient cuyo POST siempre responde 201, para tests que no verifican el fallo."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(201, json={"id": 1})
-
-    client = MasterClient()
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    yield client
-    await client.aclose()

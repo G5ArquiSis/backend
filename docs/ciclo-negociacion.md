@@ -14,13 +14,28 @@ central ◄── publica ─────────┘
 ```
 
 - **`connector` transporta.** Recibe de la central, valida el envelope, responde ACK o NACK,
-  reenvía el mensaje a `master` y publica lo que `master` le entrega.
+  reenvía el mensaje a `master` y publica lo que `master` le entrega. Atiende dos colas, cada
+  una con su conexión: la de la ciudad (`city.TAL`, protocolo de la E1) y la del observer
+  (`demand-set` de la E0, que sigue alimentando `/history`).
 - **`master` decide y persiste.** Aplica los mensajes al ledger, lleva el estado de cada
   negociación y resuelve qué hay que enviar y cuándo.
 
 `master` no tiene temporizadores. Cada vez que `connector` consulta la outbox, `master` revisa en
 la base de datos los plazos vencidos y encola lo que corresponda. Por eso un reinicio no pierde
 el reporte de un ciclo ni una negociación en curso.
+
+## Qué confirma `connector` al broker
+
+| Situación | Al broker | A la central |
+|---|---|---|
+| `master` guardó el mensaje (o era un duplicado) | Lo confirma | ACK, salvo que sea un `ack`, `nack` o `error` |
+| `master` no responde o falla | Lo reencola | Nada: no se confirma lo que aún se puede perder |
+| El envelope es inválido, o `master` rechaza el contenido | Lo confirma | NACK, y queda en el registro |
+| No se puede parsear o no trae `msgId` | Lo confirma | Nada: no hay a quién responder; queda en el registro |
+
+Si se cae la conexión al broker, `connector` reintenta con espera creciente y sigue marcando su
+señal de vida: la API sigue sirviendo lo ya persistido, y los mensajes sin confirmar vuelven
+solos a la cola.
 
 ## Contrato con `connector`
 
@@ -150,9 +165,23 @@ curl -s -X POST http://127.0.0.1:8001/internal/outbox/claim
 curl -s http://127.0.0.1:8001/cycles
 ```
 
+## Cómo activarlo en producción
+
+`connector` consume la cola de la ciudad solo si existe `CITY_BROKER_PASSWORD` en el `.env` de
+la EC2. Sin ella sigue atendiendo únicamente la cola del observer. Para cargarla, por Session
+Manager, sin que la contraseña quede en el historial:
+
+```bash
+sudo bash -c 'read -rsp "Contraseña de city.TAL: " K && echo && printf "CITY_BROKER_PASSWORD=%s\n" "$K" >> /opt/energyshark/.env'
+cd /opt/energyshark && sudo docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml up -d connector
+sudo docker logs -f energyshark-e1-connector-1     # debe decir "Escuchando la cola city.TAL"
+```
+
 ## Lo que no cubre
 
 - La interfaz todavía no consume estos endpoints: las vistas del frontend usan datos de ejemplo.
+- El destino de publicación (`CENTRAL_ROUTING_KEY=central`) no está confirmado contra la central.
+  Si es otro, `connector` lo registra como error al publicar y basta cambiar la variable.
 - Los endpoints no están en el OpenAPI del repo `contratos`.
 - El nombre de la tabla de RF05 es `message_log`, con una columna de categoría. El ADR de AD2 la
   llamaba `duplicate_messages`; se generalizó para guardar también descartados y NACK.
