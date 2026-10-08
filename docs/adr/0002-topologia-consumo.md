@@ -1,4 +1,4 @@
-# ADR-0002: Topología del Consumo de Mensajería
+# ADR-0001: Topología del Consumo de Mensajería
 
 - **Estado:** propuesto
 - **Fecha:** 2026-10-07
