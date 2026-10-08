@@ -7,7 +7,7 @@ de [AD2](adr/0001-persistencia-ledger.md) y [AD3](adr/0003-timeouts-negociacion.
 ## Reparto de responsabilidades
 
 ```
-central ──► city.TAL ──► connector ──POST /internal/messages──► master ──► Postgres
+central ──► city.TAL.q ─► connector ──POST /internal/messages──► master ──► Postgres
                              ▲                                     │
                              └────── POST /internal/outbox/claim ──┘
 central ◄── publica ─────────┘
@@ -15,7 +15,7 @@ central ◄── publica ─────────┘
 
 - **`connector` transporta.** Recibe de la central, valida el envelope, responde ACK o NACK,
   reenvía el mensaje a `master` y publica lo que `master` le entrega. Atiende dos colas, cada
-  una con su conexión: la de la ciudad (`city.TAL`, protocolo de la E1) y la del observer
+  una con su conexión: la de la ciudad (`city.TAL.q`, protocolo de la E1) y la del observer
   (`demand-set` de la E0, que sigue alimentando `/history`).
 - **`master` decide y persiste.** Aplica los mensajes al ledger, lleva el estado de cada
   negociación y resuelve qué hay que enviar y cuándo.
@@ -165,6 +165,21 @@ curl -s -X POST http://127.0.0.1:8001/internal/outbox/claim
 curl -s http://127.0.0.1:8001/cycles
 ```
 
+## Datos del broker para la ciudad
+
+Los entrega el curso junto con la contraseña. Tres nombres se parecen y no son intercambiables:
+
+| Dato | Valor | Dónde se usa |
+|---|---|---|
+| Usuario | `city.TAL` | Autenticación y propiedad `user_id` de lo que publicamos |
+| Cola | `city.TAL.q` | Lo que consumimos; el usuario no tiene permisos sobre otro nombre |
+| Exchange | `energy.x` | A donde publicamos |
+| Routing key de la central | `central` | Con la que publicamos |
+| Virtual host | `energy` | El mismo del observer |
+
+La cola no se declara, ni en modo pasivo: el usuario de la ciudad no tiene permiso de
+configuración sobre ella y el broker cierra el canal con 403.
+
 ## Cómo activarlo en producción
 
 `connector` consume la cola de la ciudad solo si existe `CITY_BROKER_PASSWORD` en el `.env` de
@@ -174,7 +189,7 @@ Manager, sin que la contraseña quede en el historial:
 ```bash
 sudo bash -c 'read -rsp "Contraseña de city.TAL: " K && echo && printf "CITY_BROKER_PASSWORD=%s\n" "$K" >> /opt/energyshark/.env'
 cd /opt/energyshark && sudo docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml up -d --no-deps connector
-sudo docker logs -f energyshark-e1-connector-1     # debe decir "Escuchando la cola city.TAL"
+sudo docker logs -f energyshark-e1-connector-1     # debe decir "Escuchando la cola city.TAL.q"
 ```
 
 `--no-deps` importa: el `.env` es compartido, y sin esa opción Compose también recrea Postgres y
@@ -183,8 +198,6 @@ sudo docker logs -f energyshark-e1-connector-1     # debe decir "Escuchando la c
 ## Lo que no cubre
 
 - La interfaz todavía no consume estos endpoints: las vistas del frontend usan datos de ejemplo.
-- El destino de publicación (`CENTRAL_ROUTING_KEY=central`) no está confirmado contra la central.
-  Si es otro, `connector` lo registra como error al publicar y basta cambiar la variable.
 - Los endpoints no están en el OpenAPI del repo `contratos`.
 - El nombre de la tabla de RF05 es `message_log`, con una columna de categoría. El ADR de AD2 la
   llamaba `duplicate_messages`; se generalizó para guardar también descartados y NACK.
