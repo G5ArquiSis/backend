@@ -214,7 +214,23 @@ AUTH0_DOMAIN=xxxx.us.auth0.com AUTH0_AUDIENCE=https://api.melchort.me \
 
 - Quedan protegidas todas las rutas `/{proxy+}`. Solo `GET /health` es pública.
 - El preflight de CORS (`OPTIONS`) no lleva token y lo sigue respondiendo el gateway.
-- `https://melchort.me` no pasa por el gateway y sigue público, por los requisitos de la E0.
+- `https://melchort.me` no pasa por el gateway y sigue público para las rutas de la E0
+  (`/history`, `/health`).
+- **Las rutas de la E1 no se pueden llamar saltándose el gateway.** El gateway agrega a cada
+  request el header `x-gateway-secret`, y Nginx responde 403 en `/negotiations`, `/cycles`,
+  `/connectivity` y `/message-log` si no coincide. `/internal/` responde 404 desde afuera: solo lo usa `connector`, por la red de Docker.
+
+El secreto no está en el repo. Vive en dos lugares y se crea una sola vez:
+
+```bash
+SECRETO=$(openssl rand -hex 24)
+# En la EC2 (Nginx lo lee con un include; sin este archivo, `nginx -t` falla):
+echo "set \$gateway_secret \"$SECRETO\";" | sudo tee /etc/nginx/energyshark-gateway-secret.conf
+sudo chmod 600 /etc/nginx/energyshark-gateway-secret.conf
+# En el gateway, sobre la integración de /{proxy+}:
+aws apigatewayv2 update-integration --api-id <api> --integration-id <integración> \
+  --request-parameters "{\"overwrite:header.x-gateway-secret\":\"$SECRETO\"}"
+```
 - Para quitar la autenticación: `SIN_AUTH=1 deploy/api-gateway/autorizador.sh`.
 
 Verificación:
@@ -239,8 +255,4 @@ curl -i https://api.melchort.me/history -H "Authorization: Bearer <token>"   # 2
 
 ## Pendiente
 
-- Aplicar el autorizador JWT del paso 11 (RNF02): falta el dominio y la audience del tenant de
-  Auth0.
-- Impedir que las rutas de la E1 se llamen por `https://melchort.me` saltándose el gateway (header
-  secreto que agrega el gateway y que Nginx exige). Las rutas de la E0 siguen públicas.
 - Cerrar el puerto 22 del security group cuando todo se opere por SSM.
