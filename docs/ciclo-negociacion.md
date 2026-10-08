@@ -173,9 +173,12 @@ Manager, sin que la contraseña quede en el historial:
 
 ```bash
 sudo bash -c 'read -rsp "Contraseña de city.TAL: " K && echo && printf "CITY_BROKER_PASSWORD=%s\n" "$K" >> /opt/energyshark/.env'
-cd /opt/energyshark && sudo docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml up -d connector
+cd /opt/energyshark && sudo docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml up -d --no-deps connector
 sudo docker logs -f energyshark-e1-connector-1     # debe decir "Escuchando la cola city.TAL"
 ```
+
+`--no-deps` importa: el `.env` es compartido, y sin esa opción Compose también recrea Postgres y
+`master-1` porque su configuración cambió.
 
 ## Lo que no cubre
 

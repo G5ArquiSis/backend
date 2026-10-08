@@ -295,8 +295,9 @@ def test_outbox_is_polled_even_when_no_messages_arrive(master_with, monkeypatch)
     # El reloj avanza 3 s por vuelta: con el intervalo de 5 s toca consultar vuelta por medio.
     assert len(polls) == 2
     assert len(beats) == 4
-    # La cola es de la central: solo se comprueba que existe, no se declara.
-    assert channel.declared == [("city.TAL", True)]
+    # La cola es de la central y la ciudad no tiene permiso de configuración: no se
+    # declara, ni en modo pasivo (el broker respondería 403 y cerraría el canal).
+    assert channel.declared == []
     assert channel.confirms_enabled is True
 
 
@@ -313,3 +314,53 @@ def test_messages_and_outbox_share_the_loop(master_with, monkeypatch) -> None:
 
     assert [message["type"] for message in channel.published] == ["ack", "negotiation-report"]
     assert channel.acked == [1]
+
+
+# --- Reconexión ------------------------------------------------------------------------
+
+
+class Stop(BaseException):
+    """Corta el bucle infinito de reconexión desde el test."""
+
+
+def run_reconnections(monkeypatch, connection_seconds: float, attempts: int) -> list[float]:
+    """Corre consume_forever con conexiones que duran `connection_seconds` y anota las esperas."""
+    clock = {"now": 0.0}
+    waits: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        if len(waits) == attempts:
+            raise Stop
+
+    def serve(_channel) -> None:
+        clock["now"] += connection_seconds
+        raise pika.exceptions.ChannelClosedByBroker(403, "ACCESS_REFUSED")
+
+    connection = type(
+        "Connection",
+        (),
+        {"is_closed": True, "channel": lambda self: None, "close": lambda self: None},
+    )
+    monkeypatch.setattr(consumer.pika, "BlockingConnection", lambda _parameters: connection())
+    monkeypatch.setattr(consumer.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(consumer.time, "sleep", sleep)
+    monkeypatch.setattr(consumer, "record_heartbeat", lambda: None)
+
+    with pytest.raises(Stop):
+        consumer.consume_forever("ciudad", "city.TAL", "x", SETTINGS, serve=serve)
+    return waits
+
+
+def test_broker_rejecting_right_after_connecting_backs_off(monkeypatch) -> None:
+    """Conectar y ser rechazado al instante no reinicia la espera: no se martilla al broker."""
+    waits = run_reconnections(monkeypatch, connection_seconds=0.2, attempts=8)
+
+    assert waits == [1, 2, 4, 8, 16, 32, 60, 60]
+
+
+def test_connection_that_lasted_resets_the_wait(monkeypatch) -> None:
+    """Tras una conexión que se sostuvo, una caída se reintenta rápido."""
+    waits = run_reconnections(monkeypatch, connection_seconds=300, attempts=3)
+
+    assert waits == [1, 1, 1]

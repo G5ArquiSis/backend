@@ -50,6 +50,9 @@ logger = logging.getLogger(__name__)
 _IDLE_SECONDS = 1
 # Pausa tras reencolar por master caído, para no girar en vacío sobre el mismo mensaje.
 _REQUEUE_PAUSE_SECONDS = 1
+# Una conexión que duró al menos esto se considera sana; si vuelve a caerse, la espera
+# de reconexión parte otra vez del mínimo.
+_STABLE_SECONDS = 60
 
 
 def main() -> None:
@@ -91,18 +94,20 @@ def consume_forever(
 ) -> None:
     """Mantiene una conexión al broker y la vuelve a abrir cada vez que se cae.
 
-    La espera crece hasta un tope y vuelve al mínimo cuando la conexión se
-    establece. La señal de vida se refresca también mientras se reintenta: un
-    broker caído no vuelve unhealthy al contenedor, porque reiniciarlo no arregla
-    nada y el resto del sistema sigue sirviendo lo ya persistido.
+    La espera crece hasta un tope y vuelve al mínimo solo cuando la conexión se
+    sostuvo un rato. Conectarse no basta: un rechazo del broker justo después de
+    autenticar (por ejemplo, un permiso faltante) dejaría al consumidor reintentando
+    cada segundo para siempre. La señal de vida se refresca también mientras se
+    reintenta: un broker caído no vuelve unhealthy al contenedor, porque reiniciarlo
+    no arregla nada y el resto del sistema sigue sirviendo lo ya persistido.
     """
     delay = settings.reconnect_initial_delay_seconds
     while True:
         connection = None
+        started = time.monotonic()
         try:
             connection = pika.BlockingConnection(_connection_parameters(user, password, settings))
             logger.info("[%s] conectado al broker como %s", name, user)
-            delay = settings.reconnect_initial_delay_seconds
             serve(connection.channel())
         except AMQPError as error:
             logger.error("[%s] conexión con el broker perdida: %r", name, error)
@@ -113,6 +118,8 @@ def consume_forever(
         finally:
             _close_quietly(connection)
 
+        if time.monotonic() - started >= _STABLE_SECONDS:
+            delay = settings.reconnect_initial_delay_seconds
         record_heartbeat()
         logger.info("[%s] reintentando en %.0f s", name, delay)
         time.sleep(delay)
@@ -129,9 +136,9 @@ def serve_city_queue(channel: BlockingChannel, master: MasterClient, settings: S
     # excepción en vez de perder el mensaje en silencio.
     channel.confirm_delivery()
     channel.basic_qos(prefetch_count=10)
-    # passive: solo comprueba que la cola existe. La cola es de la central; declararla
-    # con otros parámetros haría que el broker cierre el canal.
-    channel.queue_declare(queue=queue, passive=True)
+    # La cola no se declara, ni siquiera en modo pasivo: es de la central, y el usuario
+    # de la ciudad no tiene permiso de configuración sobre ella (el broker responde
+    # 403 ACCESS_REFUSED y cierra el canal). Solo se consume.
     logger.info("Escuchando la cola %s", queue)
 
     # -inf: la primera vuelta consulta de inmediato, sin esperar un intervalo completo.
