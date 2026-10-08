@@ -11,7 +11,7 @@ en la tabla. Si no usaste IA, el archivo existe igual, con la declaración de no
 | Integrante | Archivo |
 |---|---|
 | Melchor Guerrero | [Melchort.md](Melchort.md) |
-| | |
+| Vicente Pavez | [Vicentepvz.md](Vicentepvz.md) |
 | | |
 | | |
 | | |
