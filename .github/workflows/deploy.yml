@@ -8,6 +8,10 @@ name: CI / Deploy backend
 on:
   push:
     branches: [main]
+    # Un merge que solo toca documentación no cambia las imágenes: no vale un reinicio del stack.
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   pull_request:
   workflow_dispatch:
 
@@ -41,6 +45,22 @@ jobs:
       - run: pip install -r master/requirements.txt -r connector/requirements.txt pytest pytest-asyncio httpx ruff
       - run: ruff check .
       - run: pytest
+      # La imagen de master arranca bajo el agente de New Relic: se prueba acá, con una key
+      # falsa, para que un entrypoint roto falle en el PR y no en el deploy a producción.
+      - name: Smoke test de la imagen de master
+        run: |
+          docker build -t master-smoke ./master
+          docker run -d --name master-smoke --network host \
+            -e DATABASE_URL="$TEST_DATABASE_URL" \
+            -e NEW_RELIC_LICENSE_KEY=0000000000000000000000000000000000000000 \
+            -e NEW_RELIC_APP_NAME=ci-smoke \
+            master-smoke
+          for i in $(seq 1 20); do
+            if curl -fs http://127.0.0.1:8000/health; then exit 0; fi
+            sleep 2
+          done
+          docker logs master-smoke
+          exit 1
 
   deploy:
     needs: test
@@ -85,6 +105,9 @@ jobs:
         run: |
           # El compose y la config de Nginx viajan dentro del comando para que la EC2 siempre
           # use los de este commit.
+          # Las réplicas de master se actualizan de a una y se espera a que cada una quede
+          # healthy antes de tocar la otra: Nginx siempre tiene una a la que enviar tráfico.
+          # El último `up` levanta connector y elimina contenedores huérfanos.
           COMPOSE_B64=$(base64 -w0 deploy/docker-compose.prod.yml)
           NGINX_B64=$(base64 -w0 deploy/nginx/energyshark-tls.conf)
           COMPOSE="docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml"
@@ -104,6 +127,9 @@ jobs:
               "echo MASTER_IMAGE=\($master) > release.env",
               "echo CONNECTOR_IMAGE=\($connector) >> release.env",
               "\($compose) pull",
+              "\($compose) up -d --no-deps --wait --wait-timeout 120 postgres",
+              "\($compose) up -d --no-deps --wait --wait-timeout 120 master-1",
+              "\($compose) up -d --no-deps --wait --wait-timeout 120 master-2",
               "\($compose) up -d --remove-orphans --wait --wait-timeout 180",
               "echo \($nginx_b64) | base64 -d > /tmp/energyshark-nginx.conf",
               "if ! cmp -s /tmp/energyshark-nginx.conf \($site); then cp \($site) \($site).prev; cp /tmp/energyshark-nginx.conf \($site); if nginx -t; then systemctl reload nginx; echo \"nginx actualizado\"; else cp \($site).prev \($site); echo \"nginx -t fallo: config anterior restaurada\"; exit 1; fi; else echo \"nginx sin cambios\"; fi",
@@ -117,8 +143,9 @@ jobs:
             --parameters file://commands.json \
             --query Command.CommandId --output text)
 
-          # Espera hasta ~5 minutos; el waiter de la CLI se rinde antes de que termine un pull lento.
-          for _ in $(seq 1 60); do
+          # Espera hasta ~8 minutos; el waiter de la CLI se rinde antes de que termine un pull lento,
+          # y el reinicio escalonado suma cerca de un minuto.
+          for _ in $(seq 1 96); do
             STATUS=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" \
               --instance-id "$EC2_INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
             case "$STATUS" in Pending|InProgress|Delayed) sleep 5 ;; *) break ;; esac

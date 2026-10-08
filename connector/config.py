@@ -2,7 +2,6 @@
 
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import quote
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,10 +11,25 @@ class Settings(BaseSettings):
 
     broker_host: str
     broker_port: int = 5671
-    broker_user: str = "city.TAL"
-    broker_password: str
+    # El puerto 5671 es AMQPS; en un broker local sin TLS se apaga.
+    broker_use_ssl: bool = True
     broker_vhost: str = "/"
+
+    # Credenciales y cola del observer: los demand-set de la E0.
+    broker_user: str
+    broker_password: str
     broker_queue: str
+
+    # Credenciales de la ciudad: el usuario es city.{CODE}, la misma cadena que se usa
+    # como nombre de cola y como user_id al publicar. Sin contraseña, el consumo de la
+    # ciudad queda apagado y connector sigue atendiendo solo la E0.
+    city_code: str = "TAL"
+    city_broker_password: str = ""
+    # Dónde se publica lo que va a la central.
+    central_exchange: str = ""
+    central_routing_key: str = "central"
+    # Cada cuánto se le pide a master lo pendiente por publicar. Es el reloj del ciclo.
+    outbox_poll_seconds: float = 5
 
     master_events_url: str
     master_http_timeout_seconds: float = 10
@@ -26,23 +40,14 @@ class Settings(BaseSettings):
     heartbeat_path: Path = Path("/tmp/connector-heartbeat")
     heartbeat_max_age_seconds: float = 120
 
-    city_code: str = "TAL"
-
     # El .env es compartido por los tres containers, así que las variables de
     # Postgres llegan acá aunque connector no las use.
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property
-    def broker_url(self) -> str:
-        """URL de conexión al broker.
-
-        El puerto 5671 es AMQPS: el esquema debe ser amqps:// para que el cliente
-        haga el handshake TLS. Usuario y contraseña se escapan porque pueden
-        traer caracteres que rompen la URL.
-        """
-        credentials = f"{quote(self.broker_user, safe='')}:{quote(self.broker_password, safe='')}"
-        vhost = self.broker_vhost.lstrip("/")
-        return f"amqps://{credentials}@{self.broker_host}:{self.broker_port}/{vhost}"
+    def city_identity(self) -> str:
+        """Usuario del broker, cola y user_id de la ciudad: una sola cadena para los tres."""
+        return f"city.{self.city_code}"
 
 
 @lru_cache

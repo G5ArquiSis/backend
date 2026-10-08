@@ -1,13 +1,18 @@
 """Cliente HTTP hacia master, único punto de contacto entre los dos quanta.
 
 httpx queda aislado tras esta clase (CLAUDE.md 8): sus fallos de red y sus
-respuestas de error se traducen a MasterUnavailableError, así consumer.py decide
+respuestas de error se traducen a excepciones del dominio, así consumer.py decide
 qué hacer con el mensaje sin conocer las excepciones de la librería.
+
+Es síncrono, igual que el consumidor: pika bloquea el hilo mientras espera
+mensajes, y un cliente asíncrono no aportaría nada.
 """
 
-import httpx
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
+
+import httpx
+
 from config import get_settings
 from events import DemandEventMessage
 
@@ -15,91 +20,82 @@ logger = logging.getLogger(__name__)
 
 
 class MasterUnavailableError(Exception):
-    """master no pudo confirmar la persistencia del evento."""
+    """master no respondió o falló: el mensaje no quedó guardado y hay que reintentar."""
+
+
+class MessageRejectedError(Exception):
+    """master entendió el mensaje pero no lo puede aplicar: le falta un campo de su tipo."""
 
 
 class MasterClient:
-    """Envía eventos a POST /events y traduce los fallos al dominio."""
+    """Habla con master: eventos de la E0, mensajes del ciclo, outbox y registro."""
 
     def __init__(self) -> None:
         settings = get_settings()
         self._events_url = settings.master_events_url
-
+        # MASTER_EVENTS_URL apunta a /events; el resto de los endpoints cuelga de la misma base.
         self._base_url = self._events_url.rstrip("/").removesuffix("/events")
-
-        timeout = getattr(settings, "master_http_timeout_seconds", 5.0)
-        self._client = httpx.Client(timeout=timeout)
-
-    def enviar_evento_master(self, event: Dict[str, Any]) -> str:
-
-        # envio de evento a master, si falla se logea y se retorna "error" para que el mensaje se reencole
-
-        try:
-            # eventos de demanda de la e0, para que master los guarde en su bdd
-            if event.get("type") == "demand-set" and "packageBody" in event:
-                response = self._client.post(self._events_url, json=event)
-                if response.status_code in (200, 201):
-                    return "ok"
-                else:
-                    return "error"
-
-            # eventos de ack/nack, para que master los guarde en su bdd de eventos
-            response = self._client.post(
-                f"{self._base_url}/interno/eventos", json=event)
-
-            if response.status_code in (200, 201):
-                data = response.json()
-                return data.get("status", "ok")
-            else:
-                return "error"
-
-        except httpx.HTTPError as exc:
-            logger.error(f"Error reenviando evento a master: {exc}")
-            return "error"
-
-    def guardar_log_master(self, categoria: str,
-                           mensaje_evento: str,
-                           reason: Optional[str] = None,
-                           nack_code: Optional[int] = None
-                           ) -> bool:
-
-        # RF05: se deben registrar los mensajes descartados, los nack y los duplicados en master,
-        # Se hace un POST a /interno/logs con la información del mensaje y la razón del descarte/nack/duplicado.
-
-        mensaje_log = {
-            "category": categoria,
-            "mensaje_evento": mensaje_evento,
-            "reason": reason,
-            "codigo_nack": nack_code,
-        }
-
-        try:
-            response = self._client.post(
-                f"{self._base_url}/interno/logs", json=mensaje_log)
-            return response.status_code in (200, 201)
-
-        except httpx.HTTPError as exc:
-            logger.error(
-                f"Error registrando log en master: {exc}")
-            return False
+        self._client = httpx.Client(timeout=settings.master_http_timeout_seconds)
 
     def publish_event(self, event: DemandEventMessage) -> None:
-        """POSTea el evento y retorna solo si master confirmó haberlo guardado.
+        """POSTea un demand-set de la E0 y retorna solo si master confirmó haberlo guardado.
 
         El JSON sale con las claves camelCase del contrato, no con los nombres
         internos de los atributos.
         """
-        payload = event.model_dump(mode="json", by_alias=True)
+        self._post(self._events_url, event.model_dump(mode="json", by_alias=True))
+
+    def enviar_evento_master(self, mensaje: dict[str, Any]) -> str:
+        """Entrega a master un mensaje de la central y devuelve applied, duplicate o ignored.
+
+        Levanta MessageRejectedError si master lo considera malformado, y
+        MasterUnavailableError si no hay cómo saber si quedó guardado.
+        """
+        response = self._post(f"{self._base_url}/internal/messages", mensaje, rejects=True)
+        return response.json().get("outcome", "applied")
+
+    def guardar_log_master(self, categoria: str, mensaje_evento: str, reason: str | None) -> bool:
+        """Deja constancia de un mensaje descartado o respondido con NACK (RF05).
+
+        No levanta: perder una línea del registro no justifica reencolar ni botar
+        el consumo. Devuelve si quedó guardado.
+        """
         try:
-            response = self._client.post(self._events_url, json=payload)
+            self._post(
+                f"{self._base_url}/internal/message-log",
+                {"category": categoria, "rawContent": mensaje_evento, "reason": reason},
+            )
+        except MasterUnavailableError as error:
+            logger.error("No se pudo registrar el mensaje %s: %s", categoria, error)
+            return False
+        return True
+
+    def retirar_pendientes(self) -> list[dict[str, Any]]:
+        """Mensajes que master quiere publicar a la central, como {id, payload}.
+
+        Esta llamada es además el reloj de master: al recibirla revisa los plazos
+        vencidos (reporte del ciclo, reintentos de propuestas).
+        """
+        return self._post(f"{self._base_url}/internal/outbox/claim", None).json()
+
+    def confirmar_envio(self, message_id: int) -> None:
+        """Avisa a master que el mensaje ya se publicó, para que deje de ofrecerlo."""
+        self._post(f"{self._base_url}/internal/outbox/{message_id}/sent", None)
+
+    def close(self) -> None:
+        """Cierra el pool de conexiones HTTP."""
+        self._client.close()
+
+    def _post(self, url: str, body: Any, rejects: bool = False) -> httpx.Response:
+        try:
+            response = self._client.post(url, json=body)
         except httpx.HTTPError as exc:
             raise MasterUnavailableError(str(exc)) from exc
 
-        if response.status_code not in (200, 201):
+        if rejects and response.status_code == 422:
+            raise MessageRejectedError(response.text)
+        if not response.is_success:
             raise MasterUnavailableError(
                 f"master respondió {response.status_code}: {response.text}"
             )
-
-    def aclose(self) -> None:
-        """Cierra el pool de conexiones HTTP."""
-        self._client.close()
+        return response

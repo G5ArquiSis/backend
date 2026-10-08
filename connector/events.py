@@ -1,21 +1,21 @@
-"""Schema del evento demand-set y su parseo, en la copia propia de connector.
+"""Mensajes que connector entiende: validación del envelope v2 y armado de respuestas.
 
-master define su propia versión de este mismo contrato a propósito: son quanta
+Tiene dos partes. La primera es el protocolo de la E1 con la central: qué mensaje
+se descarta, cuál se responde con NACK y cómo se arma un ACK. La segunda es el
+evento demand-set de la E0, que sigue llegando por la cola del observer.
+
+master define su propia versión de estos contratos a propósito: son quanta
 independientes y no comparten código (CLAUDE.md 2). Lo único que ambos acuerdan
-es el nombre y el tipo de cada campo del JSON — nunca su orden ni un algoritmo
-compartido.
+es el nombre y el tipo de cada campo del JSON.
 """
-
-from datetime import datetime, timezone
-
-from pydantic import BaseModel, ConfigDict, Field
-from pydantic.alias_generators import to_camel
 
 import json
 import uuid
+from datetime import UTC, datetime
+from typing import Any
 
-from typing import Any, Dict, Optional, Tuple
-
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_camel
 
 VALID_TYPES = {
     "ack",
@@ -32,146 +32,124 @@ VALID_TYPES = {
     "request",
 }
 
+# No se hace ACK de un ACK, de un NACK ni de un error: evita el loop de cortesía.
+TYPES_WITHOUT_ACK = {"ack", "nack", "error"}
 
-def construir_mensaje_ack(msg_id_origen: str, city_code: str):
 
-    mensaje_ack = {
-        # se genera un nuevo y aleatoria idpk para el mensaje de ack, ya que es un mensaje independiente
+def construir_mensaje_ack(msg_id_origen: str, city_code: str) -> dict[str, Any]:
+    """ACK de un mensaje recibido; solo confirma la recepción, no su contenido."""
+    return {
+        # idpk y msgId nuevos y distintos entre sí: es un mensaje independiente.
         "idpk": str(uuid.uuid4()),
         "msgId": str(uuid.uuid4()),
         "type": "ack",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": _ahora(),
         "cityId": city_code,
-        "data": {
-            "target": msg_id_origen
-        }
+        "data": {"target": msg_id_origen},
     }
 
-    return mensaje_ack
 
+def construir_mensaje_nack(
+    target: str,
+    reason: str,
+    code: int,
+    mensaje: str,
+    cycle_id: str | None = None,
+    city_code: str | None = None,
+) -> dict[str, Any]:
+    """NACK de un mensaje malformado. `reason` y `code` van en el nivel superior."""
+    data: dict[str, Any] = {"target": target, "message": mensaje}
+    if cycle_id is not None:
+        # Se devuelve tal cual, para que el emisor aparee el rechazo con su mensaje.
+        data["cycleId"] = cycle_id
 
-def construir_mensaje_nack(target, reason, code, mensaje, cycle_id: Optional[str] = None):
-
-    diccionario_data = {
-        "target": target,
-        "message": mensaje
-    }
-
-    if cycle_id != None:
-        diccionario_data["cycleId"] = cycle_id
-
-    mensaje_nack = {
-        # se genera un nuevo y aleatoria idpk para el mensaje de nack, ya que es un mensaje independiente
+    nack: dict[str, Any] = {
         "idpk": str(uuid.uuid4()),
         "msgId": str(uuid.uuid4()),
         "type": "nack",
         "reason": reason,
         "code": code,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "data": diccionario_data
-    }
-
-    return mensaje_nack
-
-
-def construir_mensaje_request(msg_type: str, city_code: str, data: Dict[str, Any], cycle_id: Optional[str] = None):
-
-    # Construye un mensaje de type request (ej: distance-table o status-statement)
-
-    mensaje = {
-        "idpk": str(uuid.uuid4()),
-        "msgId": str(uuid.uuid4()),
-        "type": msg_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "cityId": city_code,
+        "timestamp": _ahora(),
         "data": data,
     }
-
-    if cycle_id:
-        mensaje["cycleId"] = cycle_id
-
-    return mensaje
+    if city_code is not None:
+        nack["cityId"] = city_code
+    return nack
 
 
-def validacion_mensaje_entrante(body):
+def construir_solicitud_directa(tipo_pedido: str, city_code: str) -> dict[str, Any]:
+    """Petición directa a la central (por ejemplo, `distance-table` o `status-statement`)."""
+    return {
+        "idpk": str(uuid.uuid4()),
+        "msgId": str(uuid.uuid4()),
+        "type": "request",
+        "timestamp": _ahora(),
+        "cityId": city_code,
+        "data": {"ask": tipo_pedido},
+    }
 
-    # Retorna: (msg_dict, nack_dict, discard_reason)
-    # Si el mensaje se descarta (invalido) se retorna (None, None, "razón de descarte")
-    # Si el mensaje no tiene los 4 atributos validos es un nack, se retorna (None, nack, None)
-    # Si el mensaje es valido se retorna el json del evento (mensaje, None, None)
 
+def validacion_mensaje_entrante(
+    body: bytes, city_code: str | None = None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    """Clasifica un mensaje de la central. Devuelve (mensaje, nack, razón de descarte).
+
+    Exactamente uno de los tres viene con valor:
+      - (None, None, razón): no se puede parsear o no trae msgId. Se descarta y se
+        registra; no hay mensaje válido al cual responder.
+      - (None, nack, None): el envelope es parseable pero inválido. Se responde NACK.
+      - (mensaje, None, None): válido.
+    """
     try:
         data = json.loads(body.decode("utf-8"))
-
-    except Exception as e:
-        # caso en que el mensaje no puede parsearse como JSON, se descarta sin NACK porque no hay msgId al que responder
-        # hay que registrarlo en el log
-        return (None, None, f"JSON no parseable: {e}")
+    except ValueError as error:
+        return (None, None, f"JSON no parseable: {error}")
 
     if not isinstance(data, dict):
-        return (None, None, "Envelope no es un objeto JSON")
-
-    # para continuar con lo realizado en la E0, se siguen recibiendo eventos para guardar en nuestra bdd
-    if data.get("type") == "demand-set" and "packageBody" in data:
-        return (data, None, None)
+        return (None, None, "El envelope no es un objeto JSON")
 
     msg_id = data.get("msgId")
-
     if not msg_id or not isinstance(msg_id, str):
-        # caso en el que el mensaje no incluye msgId. Tambien se descarta sin NACK y se registra en el log
-        mensaje = "Mensaje no incluye msgId"
-        return (None, None, mensaje)
+        return (None, None, "El mensaje no incluye msgId")
 
-    # casos en que el mensaje si puede parsearse como json y tiene un msgid
+    def nack(reason: str, code: int, mensaje: str) -> tuple[None, dict[str, Any], None]:
+        cycle_id = data.get("cycleId")
+        return (
+            None,
+            construir_mensaje_nack(
+                msg_id,
+                reason,
+                code,
+                mensaje,
+                cycle_id if isinstance(cycle_id, str) else None,
+                city_code,
+            ),
+            None,
+        )
+
     idpk = data.get("idpk")
     msg_type = data.get("type")
-    timestamp = data.get("timestamp")
-
-    # 1. Chequeo de campos obligatorios
-    if not idpk or not msg_type or not timestamp or "data" not in data:
-
-        # se envía un nack al msgId del mensaje recibido, indicando que el mensaje es inválido
-        target = msg_id
-        reason = "MALFORMED_MESSAGE"
-        code = 422
-        mensaje = "Faltan campos obligatorios en el envelope (idpk, msgId, type, timestamp)"
-        cycle_id = data.get("cycleId")
-
-        return (None, construir_mensaje_nack(target, reason, code, mensaje, cycle_id), None)
-
-    # 2. idpk equals msgId
+    if not idpk or not msg_type or not data.get("timestamp") or "data" not in data:
+        return nack(
+            "MALFORMED_MESSAGE",
+            422,
+            "Faltan campos obligatorios en el envelope (idpk, msgId, type, timestamp, data)",
+        )
+    if not isinstance(data["data"], dict):
+        return nack("MALFORMED_MESSAGE", 422, "data debe ser un objeto")
     if idpk == msg_id:
-
-        target = msg_id
-        reason = "IDPK_EQUALS_MSGID"
-        code = 422
-        mensaje = "idpk no puede ser idéntico a msgId"
-        cycle_id = data.get("cycleId")
-
-        return (None, construir_mensaje_nack(target, reason, code, mensaje, cycle_id), None)
-
-    # 3. Validar tipo del mensaje
+        return nack("IDPK_EQUALS_MSGID", 422, "idpk no puede ser idéntico a msgId")
     if msg_type not in VALID_TYPES:
-        target = msg_id
-        reason = "UNKNOWN_TYPE"
-        code = 400
-        mensaje = f"Este mensaje es de type desconocido: {msg_type}"
-        cycle_id = data.get("cycleId")
-
-        return (None, construir_mensaje_nack(target, reason, code, mensaje, cycle_id), None)
+        return nack("UNKNOWN_TYPE", 400, f"Tipo de mensaje desconocido: {msg_type}")
 
     return (data, None, None)
 
 
-def construir_solicitud_directa(tipo_pedido: str, codigo_ciudad: str) -> Dict[str, Any]:
+def _ahora() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
-    # Construye un mensaje de type request (ej: distance-table o status-statement)
 
-    return construir_mensaje_request(
-        msg_type="request",
-        city_code=codigo_ciudad,
-        data={"ask": tipo_pedido},
-    )
+# --- Evento demand-set de la E0 --------------------------------------------------------
 
 
 class MalformedEventError(Exception):
