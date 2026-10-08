@@ -11,6 +11,7 @@
 | `arquitectura.md` — diagrama UML de componentes y cómo correr en local | RDOC03 | D |
 | [monitoreo.md](monitoreo.md) — New Relic: cómo está instalado y cómo replicarlo | RDOC03 | E |
 | [infraestructura.md](infraestructura.md) — runbook de AWS y deploy | RNF04 | E |
+| [ciclo-negociacion.md](ciclo-negociacion.md) — ledger, reporte, negociaciones y contrato con `connector` | RF03, RF04 | B, C |
 
 Los schemas de mensajes y el OpenAPI (RDOC04) viven en el repo
 [`contratos`](https://github.com/G5ArquiSis/contratos).
