@@ -1,7 +1,7 @@
 # Ciclo de negociación: ledger, reporte y negociaciones
 
-Cómo `master` lleva el ledger, envía el `negotiation-report` y maneja las negociaciones
-voluntarias, y qué necesita de `connector` para que todo corra. Las decisiones están en los ADRs
+Cómo `master` lleva el ledger, envía el `negotiation-report`, maneja las negociaciones
+voluntarias y registra lo que no se aplicó, y qué necesita de `connector` para que todo corra. Las decisiones están en los ADRs
 de [AD2](adr/0001-persistencia-ledger.md) y [AD3](adr/0003-timeouts-negociacion.md).
 
 ## Reparto de responsabilidades
@@ -24,7 +24,7 @@ el reporte de un ciclo ni una negociación en curso.
 
 ## Contrato con `connector`
 
-Son tres llamadas HTTP a `master`, por la red de Docker (`http://master:8000`).
+Son cuatro llamadas HTTP a `master`, por la red de Docker (`http://master:8000`).
 
 ### 1. Reenviar cada mensaje válido de la central
 
@@ -38,8 +38,8 @@ Content-Type: application/json
 | Respuesta | Significado | Qué hace `connector` |
 |---|---|---|
 | 200 `{"outcome": "applied"}` | Se aplicó | Confirmar el mensaje al broker |
-| 200 `{"outcome": "duplicate"}` | Ese `idpk` ya estaba aplicado; no cambió nada | Confirmar el mensaje al broker |
-| 200 `{"outcome": "ignored"}` | El tipo no afecta al ciclo (`ack`, `distance-table`, etc.) | Confirmar el mensaje al broker |
+| 200 `{"outcome": "duplicate"}` | Ese `idpk` ya estaba aplicado; no cambió nada y quedó en el registro de duplicados | Confirmar el mensaje al broker |
+| 200 `{"outcome": "ignored"}` | El tipo no afecta al estado (`ack`, `request`, etc.) | Confirmar el mensaje al broker |
 | 422 | Le falta un campo que su tipo exige | Responder NACK a la central |
 | 5xx o sin respuesta | `master` no está disponible | Reencolar y reintentar; no confirmar |
 
@@ -72,6 +72,19 @@ Un mensaje retirado y no confirmado se vuelve a ofrecer a los 60 segundos. Así,
 se cae entre retirar y publicar, el mensaje no se pierde. Publicar dos veces el mismo mensaje no
 hace daño: lleva el mismo `idpk`.
 
+### 4. Informar lo que no se aplicó
+
+```
+POST /internal/message-log
+Content-Type: application/json
+
+{ "category": "discarded" | "nack", "rawContent": "<cuerpo tal como llegó>", "reason": "MALFORMED_MESSAGE" }
+```
+
+`connector` lo llama cuando descarta un mensaje (no se pudo parsear o no trae `msgId`) y cuando
+responde NACK. `rawContent` es texto, porque un mensaje descartado puede no ser JSON. Los
+duplicados no se informan por acá: los registra `master` al detectarlos.
+
 ## Qué hace `master` con cada mensaje
 
 | Tipo | Efecto |
@@ -83,6 +96,7 @@ hace daño: lleva el mismo `idpk`.
 | `give` | Confirma nuestra venta y abre el plazo de 30 segundos para recibir el pago |
 | `transfer` con `becauseOf` | Pago de una venta: recién acá se aplica al ledger |
 | `error`, `nack` | Rechaza la propuesta, o reprograma el reporte si es `REPORT_TOO_EARLY` |
+| `distance-table` | Guarda la tabla; la vigente es la última recibida |
 
 El presupuesto se traspasa entre ciclos: el `budgetBalance` que se reporta es la suma de todos
 los eventos. La energía es por ciclo.
@@ -96,16 +110,20 @@ los eventos. La energía es por ciclo.
 - Si el ledger cambia después de reportar y la ventana sigue abierta, se envía una corrección
   con un `idpk` nuevo.
 
-## API de negociaciones (RF04)
+## API para la interfaz
 
-Entran por `https://api.melchort.me`, con el token de Auth0.
+Entran por `https://api.melchort.me`, con el token de Auth0. Por `https://melchort.me` responden
+403.
 
 | Endpoint | Qué hace |
 |---|---|
+| `GET /cycles` | Ciclos del más reciente al más antiguo, con su balance y el presupuesto actual (RF01) |
+| `GET /cycles/{cycleId}` | Historial de un ciclo: `statusStatement`, `transfers`, `demandStatements`, `negotiations`, `report` y `balances`. `operations` trae todo en orden, y la última lleva `isLast: true` (RF01) |
+| `GET /connectivity` | La `distance-table` vigente: destino, distancia, `transportCost` y `enabled` (RF02) |
+| `GET /message-log` | Duplicados, descartados y NACK, paginados; filtra con `?category=duplicate\|discarded\|nack` (RF05) |
 | `POST /negotiations` | Crea una propuesta: `{"direction": "give" \| "take", "quantity": 300, "pricePerEnergy": 220.5}`. Sin precio, oferta el tope del ciclo. Responde 409 con el motivo si no hay ventana abierta, si el precio supera el tope o si un `give` excede la energía vendible |
 | `GET /negotiations` | Historial con estado: `pending`, `confirmed`, `paid`, `expired` o `rejected` |
 | `GET /negotiations/{id}` | Detalle, con el número de intentos y el motivo de rechazo |
-| `GET /cycles` | Últimos ciclos con su balance, el estado de su reporte y el presupuesto actual |
 
 ## Configuración
 
@@ -134,5 +152,7 @@ curl -s http://127.0.0.1:8001/cycles
 
 ## Lo que no cubre
 
-Registro consultable de duplicados y de mensajes descartados (RF05), `distance-table` (RF02) e
-historial de ciclos para la interfaz (RF01).
+- La interfaz todavía no consume estos endpoints: las vistas del frontend usan datos de ejemplo.
+- Los endpoints no están en el OpenAPI del repo `contratos`.
+- El nombre de la tabla de RF05 es `message_log`, con una columna de categoría. El ADR de AD2 la
+  llamaba `duplicate_messages`; se generalizó para guardar también descartados y NACK.

@@ -66,9 +66,7 @@ class LedgerEvent(Base):
     energy_delta: Mapped[Decimal] = mapped_column(_Energy, default=Decimal(0))
     budget_delta: Mapped[Decimal] = mapped_column(_Amount, default=Decimal(0))
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class CycleLedger(Base):
@@ -103,9 +101,7 @@ class CycleLedger(Base):
     reported_energy: Mapped[Decimal | None] = mapped_column(_Energy, nullable=True)
     report_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Negotiation(Base):
@@ -130,9 +126,7 @@ class Negotiation(Base):
     confirmed_price: Mapped[Decimal | None] = mapped_column(_Amount, nullable=True)
     amount: Mapped[Decimal | None] = mapped_column(_Amount, nullable=True)
     reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -154,6 +148,43 @@ class OutboxMessage(Base):
     payload: Mapped[dict] = mapped_column(JSONB)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MessageLog(Base):
+    """Mensajes que no se aplicaron: duplicados, descartados y respondidos con NACK (RF05).
+
+    Los duplicados los registra master al detectar un idpk ya aplicado. Los
+    descartados y los NACK los informa connector, que es quien valida el envelope.
+    """
+
+    __tablename__ = "message_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category: Mapped[str] = mapped_column(String(16), index=True)
+    # Nulos cuando el mensaje no se pudo parsear: no hay de dónde sacarlos.
+    idpk: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    message_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Texto y no JSONB: un mensaje descartado puede no ser JSON válido.
+    raw_content: Mapped[str] = mapped_column(Text)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_message_log_received_at", "received_at"),)
+
+
+class DistanceTable(Base):
+    """Una distance-table recibida de la central; la vigente es la más reciente (RF02)."""
+
+    __tablename__ = "distance_tables"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idpk: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    distances: Mapped[dict] = mapped_column(JSONB, default=dict)
+    received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

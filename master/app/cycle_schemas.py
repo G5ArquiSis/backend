@@ -74,3 +74,87 @@ class CycleList(CamelCaseModel):
 
     budget_balance: Decimal
     items: list[CycleOut]
+
+
+class LedgerEventOut(CamelCaseModel):
+    """Una operación aplicada al ledger dentro de un ciclo."""
+
+    idpk: str
+    kind: str
+    energy_delta: Decimal
+    budget_delta: Decimal
+    applied_at: datetime
+    # True en la última operación aplicada del ciclo (RF01).
+    is_last: bool
+    message: dict
+
+
+class CycleBalances(CamelCaseModel):
+    """Balances finales del ciclo: la energía es propia; el presupuesto viene acumulado."""
+
+    energy: Decimal
+    budget: Decimal
+
+
+class CycleDetail(CamelCaseModel):
+    """Todo lo que pasó en un ciclo, en un solo documento (RF01)."""
+
+    cycle_id: str
+    opened: bool
+    valid_until: datetime | None
+    status_statement: dict | None
+    transfers: list[LedgerEventOut]
+    demand_statements: list[LedgerEventOut]
+    negotiations: list[NegotiationOut]
+    report: dict | None
+    report_sent_at: datetime | None
+    report_error: str | None
+    balances: CycleBalances
+    last_operation_idpk: str | None
+    operations: list[LedgerEventOut]
+
+
+class Connection(CamelCaseModel):
+    """Ruta hacia otra ciudad, según la distance-table vigente."""
+
+    destination: str
+    distance: float | None
+    transport_cost: float | None
+    enabled: bool | None
+
+
+class Connectivity(CamelCaseModel):
+    """La distance-table vigente; `updatedAt` es nulo si la central aún no envió ninguna."""
+
+    updated_at: datetime | None
+    connections: list[Connection]
+
+
+class UnappliedMessageIn(CamelCaseModel):
+    """Lo que connector informa al descartar un mensaje o responderle NACK."""
+
+    category: Literal["discarded", "nack"]
+    raw_content: str
+    reason: str | None = None
+
+
+class MessageLogEntry(CamelCaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, from_attributes=True)
+
+    id: int
+    category: str
+    idpk: str | None
+    msg_id: str | None
+    message_type: str | None
+    cycle_id: str | None
+    reason: str | None
+    raw_content: str
+    received_at: datetime
+
+
+class MessageLogPage(CamelCaseModel):
+    items: list[MessageLogEntry]
+    page: int
+    limit: int
+    total: int
+    pages: int

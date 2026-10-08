@@ -16,9 +16,10 @@ from app.cycle_repository import (
     apply_central_message,
     claim_outbox,
     mark_outbox_sent,
+    record_unapplied_message,
     run_due_work,
 )
-from app.cycle_schemas import ApplyResult, OutboxItem
+from app.cycle_schemas import ApplyResult, MessageLogEntry, OutboxItem, UnappliedMessageIn
 from app.database import get_session
 
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -67,3 +68,19 @@ async def confirm_message_sent(message_id: int, session: SessionDependency) -> N
     """connector confirma que publicó el mensaje; deja de ofrecerse."""
     if not await mark_outbox_sent(session, message_id, datetime.now(UTC)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mensaje no encontrado")
+
+
+@router.post("/message-log", response_model=MessageLogEntry, status_code=status.HTTP_201_CREATED)
+async def log_unapplied_message(
+    entry: UnappliedMessageIn, session: SessionDependency
+) -> MessageLogEntry:
+    """connector deja constancia de un mensaje descartado o respondido con NACK (RF05).
+
+    `rawContent` es el cuerpo tal como llegó del broker, aunque no sea JSON válido.
+    Los duplicados no se informan por acá: los registra master al detectarlos.
+    """
+    stored = await record_unapplied_message(
+        session, entry.category, entry.raw_content, entry.reason
+    )
+
+    return MessageLogEntry.model_validate(stored)

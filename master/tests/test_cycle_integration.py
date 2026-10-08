@@ -38,7 +38,7 @@ from app.cycle_repository import (
     total_budget,
 )
 from app.database import _session_factory
-from app.models import CycleLedger, LedgerEvent, Negotiation
+from app.models import CycleLedger, LedgerEvent, MessageLog, Negotiation
 
 pytestmark = pytest.mark.integration
 
@@ -55,7 +55,10 @@ async def db(database: None) -> AsyncIterator[AsyncSession]:
     """Sesión con las tablas del ciclo vacías al empezar."""
     async with _session_factory() as session:
         await session.execute(
-            text("TRUNCATE ledger_events, cycle_ledger, negotiations, outbox RESTART IDENTITY")
+            text(
+                "TRUNCATE ledger_events, cycle_ledger, negotiations, outbox, message_log, "
+                "distance_tables RESTART IDENTITY"
+            )
         )
         await session.commit()
         yield session
@@ -222,7 +225,9 @@ async def test_transfer_can_arrive_before_the_status_statement(db: AsyncSession)
 
 async def test_types_that_do_not_touch_the_cycle_are_ignored(db: AsyncSession) -> None:
     assert await apply(db, central("ack", "ack-1", {"target": "x"}, None)) == IGNORED
-    assert await apply(db, central("distance-table", "dist-1", {"distances": {}}, None)) == IGNORED
+    assert (
+        await apply(db, central("request", "req-1", {"ask": "status-statement"}, None)) == IGNORED
+    )
 
 
 async def test_message_missing_a_required_field_is_rejected_without_side_effects(
@@ -589,3 +594,155 @@ async def test_negotiation_endpoints_create_and_list_proposals(
     assert Decimal(cycles["budgetBalance"]) == Decimal("0")
     assert cycles["items"][0]["cycleId"] == CYCLE
     assert Decimal(cycles["items"][0]["energyBalance"]) == Decimal("600")
+
+
+# --- RF01, RF02 y RF05 -----------------------------------------------------------------
+
+
+def distance_table(idpk: str, hgw_cost: float) -> dict:
+    routes = {
+        "TAR": {"distance": 94306517, "transportCost": 0.0013, "enabled": False},
+        "HGW": {"distance": 62763183, "transportCost": hgw_cost, "enabled": True},
+    }
+    return central("distance-table", idpk, {"distances": routes}, None)
+
+
+async def test_duplicate_is_recorded_and_can_be_queried(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """RF05 y anomalía 1: el reenvío no cambia el ledger y queda en el registro."""
+    await apply(db, status_statement())
+    transfer = central("transfer", "transfer-1", {"quantity": 1000})
+    await apply(db, transfer)
+    await apply(db, transfer)
+
+    page = (await client.get("/message-log", params={"category": "duplicate"})).json()
+
+    assert page["total"] == 1
+    [entry] = page["items"]
+    assert entry["idpk"] == "transfer-1"
+    assert entry["messageType"] == "transfer"
+    assert entry["cycleId"] == CYCLE
+    assert await total_budget(db) == Decimal("1000")
+
+
+async def test_connector_reports_discarded_and_nacked_messages(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """RF05: lo que connector descarta o rechaza también queda consultable."""
+    not_json = await client.post(
+        "/internal/message-log",
+        json={"category": "discarded", "rawContent": "{esto no es json", "reason": "no parseable"},
+    )
+    nacked = await client.post(
+        "/internal/message-log",
+        json={
+            "category": "nack",
+            "rawContent": '{"msgId": "m-9", "type": "transfer", "idpk": "m-9"}',
+            "reason": "IDPK_EQUALS_MSGID",
+        },
+    )
+    assert not_json.status_code == 201
+    assert not_json.json()["msgId"] is None
+    assert nacked.json()["msgId"] == "m-9"
+
+    everything = (await client.get("/message-log")).json()
+    assert [entry["category"] for entry in everything["items"]] == ["nack", "discarded"]
+    only_nack = (await client.get("/message-log", params={"category": "nack"})).json()
+    assert only_nack["total"] == 1
+    assert only_nack["items"][0]["reason"] == "IDPK_EQUALS_MSGID"
+
+    unknown = await client.post(
+        "/internal/message-log", json={"category": "duplicate", "rawContent": "x"}
+    )
+    assert unknown.status_code == 422
+
+
+async def test_message_log_is_paginated(client: httpx.AsyncClient, db: AsyncSession) -> None:
+    db.add_all(
+        [MessageLog(category="discarded", raw_content=f"basura {number}") for number in range(30)]
+    )
+    await db.commit()
+
+    first = (await client.get("/message-log")).json()
+    last = (await client.get("/message-log", params={"page": 2})).json()
+
+    assert (len(first["items"]), first["total"], first["pages"]) == (25, 30, 2)
+    assert len(last["items"]) == 5
+
+
+async def test_connectivity_shows_the_latest_distance_table(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """RF02: la tabla vigente es la última publicada, no la primera."""
+    assert (await client.get("/connectivity")).json() == {"updatedAt": None, "connections": []}
+
+    assert await apply(db, distance_table("dist-1", 0.0034)) == APPLIED
+    assert await apply(db, distance_table("dist-1", 0.0034)) == DUPLICATE
+    assert await apply(db, distance_table("dist-2", 0.0050)) == APPLIED
+
+    body = (await client.get("/connectivity")).json()
+
+    assert body["updatedAt"] is not None
+    assert body["connections"] == [
+        {"destination": "HGW", "distance": 62763183.0, "transportCost": 0.005, "enabled": True},
+        {"destination": "TAR", "distance": 94306517.0, "transportCost": 0.0013, "enabled": False},
+    ]
+
+
+async def test_cycle_detail_explains_everything_that_happened(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """RF01: status, fondos, demand-statements, negociaciones, reporte y balances finales."""
+    await open_cycle(db)
+    demand = {"balance": {"quantity": 1500, "valuePerKwh": 215}}
+    await apply(db, central("demand-statement", "demand-1", demand))
+    proposal = await propose(db, "take", "100", WINDOW_START)
+    take = central(
+        "take", "take-1", {"target": proposal["msgId"], "energy": 100, "pricePerEnergy": 210}
+    )
+    await apply(db, take)
+    await outbox_at(db, CLOSING)
+
+    detail = (await client.get(f"/cycles/{CYCLE}")).json()
+
+    assert detail["cycleId"] == CYCLE
+    assert detail["statusStatement"]["data"]["energy"]["generationCost"] == 210
+    assert [item["idpk"] for item in detail["transfers"]] == ["transfer-1"]
+    assert [item["idpk"] for item in detail["demandStatements"]] == ["demand-1"]
+    assert [item["state"] for item in detail["negotiations"]] == ["paid"]
+    assert detail["report"]["type"] == "negotiation-report"
+    assert detail["report"]["data"] == {"budgetBalance": 656500, "energyBalance": 2200}
+    assert Decimal(detail["balances"]["energy"]) == Decimal("2200")
+    assert Decimal(detail["balances"]["budget"]) == Decimal("656500")
+
+    kinds = [operation["kind"] for operation in detail["operations"]]
+    assert kinds == ["status-statement", "transfer", "demand-statement", "take"]
+    assert [operation["isLast"] for operation in detail["operations"]] == [
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert detail["lastOperationIdpk"] == detail["operations"][-1]["idpk"]
+
+    assert (await client.get("/cycles/cycle-0")).status_code == 404
+
+
+async def test_budget_at_close_of_a_past_cycle_ignores_later_cycles(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """AD2: el estado de un ciclo pasado se reconstruye sin mezclar lo que vino después."""
+    await apply(db, status_statement())
+    await apply(db, central("transfer", "transfer-1", {"quantity": 1000}))
+    await apply(
+        db,
+        status_statement("status-2", "cycle-9432", valid_until=VALID_UNTIL + timedelta(hours=2)),
+    )
+    await apply(db, central("transfer", "transfer-2", {"quantity": 250}, "cycle-9432"))
+
+    past = (await client.get(f"/cycles/{CYCLE}")).json()
+    latest = (await client.get("/cycles/cycle-9432")).json()
+
+    assert Decimal(past["balances"]["budget"]) == Decimal("1000")
+    assert Decimal(latest["balances"]["budget"]) == Decimal("1250")

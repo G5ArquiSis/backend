@@ -15,6 +15,7 @@ Tres ideas sostienen el módulo (ADRs de AD2 y AD3):
   bloqueadas o con un UPDATE condicional, de modo que solo una réplica la ejecuta.
 """
 
+import json
 import uuid
 from collections.abc import Sequence
 from datetime import datetime, timedelta
@@ -35,7 +36,14 @@ from app.ledger import (
     status_statement_energy,
     total_amount,
 )
-from app.models import CycleLedger, LedgerEvent, Negotiation, OutboxMessage
+from app.models import (
+    CycleLedger,
+    DistanceTable,
+    LedgerEvent,
+    MessageLog,
+    Negotiation,
+    OutboxMessage,
+)
 
 PENDING = "pending"
 CONFIRMED = "confirmed"
@@ -46,6 +54,11 @@ REJECTED = "rejected"
 APPLIED = "applied"
 DUPLICATE = "duplicate"
 IGNORED = "ignored"
+
+# Categorías del registro de mensajes no aplicados (RF05).
+LOG_DUPLICATE = "duplicate"
+LOG_DISCARDED = "discarded"
+LOG_NACK = "nack"
 
 # Estados desde los que todavía se acepta una confirmación. Incluye EXPIRED: si la
 # central confirma tarde, ya ejecutó la operación y el ledger debe reflejarla.
@@ -78,8 +91,9 @@ async def apply_central_message(
     """Aplica un mensaje de la central y devuelve APPLIED, DUPLICATE o IGNORED.
 
     Es idempotente: reenviar el mismo mensaje devuelve DUPLICATE sin tocar el
-    ledger. Todo ocurre en una transacción, así que un fallo a mitad de camino no
-    deja el evento sin su efecto ni el efecto sin su evento.
+    ledger, y el duplicado queda en el registro consultable (RF05). Todo ocurre en
+    una transacción, así que un fallo a mitad de camino no deja el evento sin su
+    efecto ni el efecto sin su evento.
     """
     handler = _HANDLERS.get(message.get("type"))
     if handler is None:
@@ -93,8 +107,16 @@ async def apply_central_message(
 
     if outcome == APPLIED:
         await session.commit()
-    else:
-        await session.rollback()
+        return outcome
+
+    await session.rollback()
+    if outcome == DUPLICATE:
+        await record_unapplied_message(
+            session,
+            LOG_DUPLICATE,
+            json.dumps(message, ensure_ascii=False),
+            "La operación ya estaba aplicada; no se volvió a aplicar",
+        )
     return outcome
 
 
@@ -272,6 +294,23 @@ async def _apply_give_payment(session: AsyncSession, message: dict, because_of: 
     return APPLIED if recorded else DUPLICATE
 
 
+async def _apply_distance_table(
+    session: AsyncSession, message: dict, now: datetime, settings: Settings
+) -> str:
+    """Guarda la tabla de distancias; la vigente es la última recibida (RF02)."""
+    distances = message["data"]["distances"]
+    if not isinstance(distances, dict):
+        raise TypeError("data.distances debe ser un objeto")
+
+    inserted = await session.execute(
+        postgres_insert(DistanceTable)
+        .values(idpk=message["idpk"], distances=distances)
+        .on_conflict_do_nothing(index_elements=["idpk"])
+        .returning(DistanceTable.id)
+    )
+    return APPLIED if inserted.scalar_one_or_none() is not None else DUPLICATE
+
+
 async def _apply_rejection(
     session: AsyncSession, message: dict, now: datetime, settings: Settings
 ) -> str:
@@ -314,6 +353,7 @@ _HANDLERS = {
     TAKE: _apply_confirmation,
     "error": _apply_rejection,
     "nack": _apply_rejection,
+    "distance-table": _apply_distance_table,
 }
 
 
@@ -547,12 +587,108 @@ async def list_negotiations(
     return found.scalars().all()
 
 
-async def list_cycles(session: AsyncSession, limit: int) -> Sequence[CycleLedger]:
-    """Últimos ciclos con su balance y el estado de su reporte."""
+async def list_cycles(session: AsyncSession, limit: int, offset: int = 0) -> Sequence[CycleLedger]:
+    """Ciclos del más reciente al más antiguo, con su balance y el estado de su reporte."""
     found = await session.execute(
-        select(CycleLedger).order_by(CycleLedger.created_at.desc()).limit(limit)
+        select(CycleLedger)
+        .order_by(CycleLedger.created_at.desc(), CycleLedger.cycle_id.desc())
+        .limit(limit)
+        .offset(offset)
     )
     return found.scalars().all()
+
+
+async def get_cycle(session: AsyncSession, cycle_id: str) -> CycleLedger | None:
+    return await session.get(CycleLedger, cycle_id)
+
+
+async def list_cycle_events(session: AsyncSession, cycle_id: str) -> Sequence[LedgerEvent]:
+    """Operaciones aplicadas en el ciclo, en el orden en que se aplicaron."""
+    found = await session.execute(
+        select(LedgerEvent).where(LedgerEvent.cycle_id == cycle_id).order_by(LedgerEvent.id)
+    )
+    return found.scalars().all()
+
+
+async def list_cycle_negotiations(session: AsyncSession, cycle_id: str) -> Sequence[Negotiation]:
+    found = await session.execute(
+        select(Negotiation).where(Negotiation.cycle_id == cycle_id).order_by(Negotiation.id)
+    )
+    return found.scalars().all()
+
+
+async def get_cycle_report(session: AsyncSession, cycle: CycleLedger) -> dict | None:
+    """El negotiation-report vigente del ciclo, tal como se publicó; None si no hay."""
+    if cycle.report_msg_id is None:
+        return None
+    found = await session.execute(
+        select(OutboxMessage.payload).where(
+            OutboxMessage.dedupe_key == f"report:{cycle.cycle_id}:{cycle.report_msg_id}"
+        )
+    )
+    return found.scalar_one_or_none()
+
+
+async def budget_at_close(session: AsyncSession, cycle: CycleLedger) -> Decimal:
+    """Presupuesto al cierre del ciclo: lo acumulado hasta él, incluido."""
+    summed = await session.execute(
+        select(func.coalesce(func.sum(CycleLedger.budget_delta), 0)).where(
+            CycleLedger.created_at <= cycle.created_at
+        )
+    )
+    return Decimal(summed.scalar_one())
+
+
+# --- Conectividad y registro de mensajes no aplicados ----------------------------------
+
+
+async def current_distance_table(session: AsyncSession) -> DistanceTable | None:
+    """La distance-table vigente: la última que publicó la central."""
+    found = await session.execute(select(DistanceTable).order_by(DistanceTable.id.desc()).limit(1))
+    return found.scalar_one_or_none()
+
+
+async def record_unapplied_message(
+    session: AsyncSession, category: str, raw_content: str, reason: str | None
+) -> MessageLog:
+    """Deja constancia de un mensaje duplicado, descartado o respondido con NACK.
+
+    Los campos del envelope se extraen si el contenido se puede parsear; un
+    mensaje descartado puede no ser JSON, y entonces se guarda solo el texto.
+    """
+    envelope = _parse_envelope(raw_content)
+    entry = MessageLog(
+        category=category,
+        idpk=_text_or_none(envelope.get("idpk")),
+        msg_id=_text_or_none(envelope.get("msgId")),
+        message_type=_text_or_none(envelope.get("type")),
+        cycle_id=_text_or_none(envelope.get("cycleId")),
+        reason=reason[:128] if reason else None,
+        raw_content=raw_content,
+    )
+    session.add(entry)
+    await session.commit()
+    return entry
+
+
+async def list_message_log(
+    session: AsyncSession, category: str | None, limit: int, offset: int
+) -> Sequence[MessageLog]:
+    """Registro de mensajes no aplicados, del más reciente al más antiguo, siempre acotado."""
+    statement = select(MessageLog)
+    if category is not None:
+        statement = statement.where(MessageLog.category == category)
+    statement = statement.order_by(MessageLog.id.desc()).limit(limit).offset(offset)
+
+    return (await session.execute(statement)).scalars().all()
+
+
+async def count_message_log(session: AsyncSession, category: str | None) -> int:
+    statement = select(func.count(MessageLog.id))
+    if category is not None:
+        statement = statement.where(MessageLog.category == category)
+
+    return (await session.execute(statement)).scalar_one()
 
 
 async def total_budget(session: AsyncSession) -> Decimal:
@@ -663,6 +799,19 @@ def _envelope(
         "cycleId": cycle_id,
         "data": data,
     }
+
+
+def _parse_envelope(raw_content: str) -> dict:
+    try:
+        parsed = json.loads(raw_content)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _text_or_none(value: object) -> str | None:
+    """Un campo del envelope solo si es texto: un mensaje malformado puede traer cualquier cosa."""
+    return value[:64] if isinstance(value, str) else None
 
 
 def _decimal(value: object) -> Decimal:

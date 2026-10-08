@@ -217,8 +217,8 @@ AUTH0_DOMAIN=xxxx.us.auth0.com AUTH0_AUDIENCE=https://api.melchort.me \
 - `https://melchort.me` no pasa por el gateway y sigue público para las rutas de la E0
   (`/history`, `/health`).
 - **Las rutas de la E1 no se pueden llamar saltándose el gateway.** El gateway agrega a cada
-  request el header `x-gateway-secret`, y Nginx responde 403 en `/negotiations` y `/cycles` si no
-  coincide. `/internal/` responde 404 desde afuera: solo lo usa `connector`, por la red de Docker.
+  request el header `x-gateway-secret`, y Nginx responde 403 en `/negotiations`, `/cycles`,
+  `/connectivity` y `/message-log` si no coincide. `/internal/` responde 404 desde afuera: solo lo usa `connector`, por la red de Docker.
 
 El secreto no está en el repo. Vive en dos lugares y se crea una sola vez:
 
