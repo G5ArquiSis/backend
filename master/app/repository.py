@@ -9,13 +9,14 @@ Todo el uso de SQLAlchemy sigue contenido en estos dos archivos (seccion 8).
 
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Optional, Sequence, Tuple
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DemandEvent
-from app.schemas import DemandEventIn, HistoryFilters, PageParams
+from app.models import DemandEvent, DistanceTableEntry, MessageAuditLog
+from app.schemas import DemandEventIn, HistoryFilters, PageParams, AuditLogCreate
 
 
 async def save_demand_event(
@@ -75,8 +76,10 @@ async def list_demand_events(
     # El desempate por id no es cosmético: now() es constante dentro de una misma
     # transacción, así que dos eventos guardados juntos comparten received_at y
     # sin un orden total una fila podría salir en dos páginas o en ninguna.
-    statement = statement.order_by(DemandEvent.received_at.desc(), DemandEvent.id.desc())
-    statement = statement.limit(pagination.limit).offset((pagination.page - 1) * pagination.limit)
+    statement = statement.order_by(
+        DemandEvent.received_at.desc(), DemandEvent.id.desc())
+    statement = statement.limit(pagination.limit).offset(
+        (pagination.page - 1) * pagination.limit)
 
     return (await session.execute(statement)).scalars().all()
 
@@ -105,12 +108,14 @@ def _apply_filters(statement: Select, filters: HistoryFilters) -> Select:
         statement = statement.where(DemandEvent.event_type == filters.type)
     if filters.received_at is not None:
         start, end = _day_bounds(filters.received_at)
-        statement = statement.where(DemandEvent.received_at >= start, DemandEvent.received_at < end)
+        statement = statement.where(
+            DemandEvent.received_at >= start, DemandEvent.received_at < end)
     if filters.valid_until is not None:
         # valid_until es nullable y NULL >= start es NULL, así que los eventos sin
         # validUntil quedan fuera del filtro por sí solos.
         start, end = _day_bounds(filters.valid_until)
-        statement = statement.where(DemandEvent.valid_until >= start, DemandEvent.valid_until < end)
+        statement = statement.where(
+            DemandEvent.valid_until >= start, DemandEvent.valid_until < end)
 
     # city y unit se combinan en un solo elemento de contención: ?city=X&unit=Y
     # pide un evento donde una misma ciudad tenga esa unidad. Como dos condiciones
@@ -122,7 +127,8 @@ def _apply_filters(statement: Select, filters: HistoryFilters) -> Select:
         if value is not None
     }
     if demand_item:
-        statement = statement.where(DemandEvent.demands.contains([demand_item]))
+        statement = statement.where(
+            DemandEvent.demands.contains([demand_item]))
 
     return statement
 
@@ -140,3 +146,69 @@ def _day_bounds(day: date) -> tuple[datetime, datetime]:
     start = datetime.combine(day, time.min, tzinfo=UTC)
 
     return start, start + timedelta(days=1)
+
+
+async def save_audit_log(session: AsyncSession, payload: AuditLogCreate) -> MessageAuditLog:
+    """Inserta un registro de auditoría (descarte, NACK o duplicado)[cite: 26, 31]."""
+    log_entry = MessageAuditLog(
+        category=payload.category,
+        reason=payload.reason,
+        nack_code=payload.nack_code,
+        raw_content=payload.raw_content,
+    )
+    session.add(log_entry)
+    await session.commit()
+    await session.refresh(log_entry)
+    return log_entry
+
+
+async def get_audit_logs(
+    session: AsyncSession,
+    category: Optional[str] = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> Tuple[Sequence[MessageAuditLog], int]:
+    """Retorna los registros de auditoría paginados y el conteo total[cite: 26, 31]."""
+    query = select(MessageAuditLog)
+    count_query = select(func.count(MessageAuditLog.id))
+
+    if category:
+        query = query.where(MessageAuditLog.category == category)
+        count_query = count_query.where(MessageAuditLog.category == category)
+
+    total_result = await session.execute(count_query)
+    total = total_result.scalar_one()
+
+    query = query.order_by(MessageAuditLog.created_at.desc()
+                           ).offset(offset).limit(limit)
+    result = await session.execute(query)
+    items = result.scalars().all()
+
+    return items, total
+
+
+async def upsert_distance_table(session: AsyncSession, distances: dict) -> None:
+    """Actualiza o inserta las distancias vigentes de la tabla de conectividad[cite: 23, 26, 31]."""
+    for dest_code, info in distances.items():
+        stmt = select(DistanceTableEntry).where(
+            DistanceTableEntry.destination_code == dest_code)
+        result = await session.execute(stmt)
+        entry = result.scalar_one_or_none()
+
+        if not entry:
+            entry = DistanceTableEntry(destination_code=dest_code)
+            session.add(entry)
+
+        entry.distance = float(info.get("distance", 0.0))
+        entry.transport_cost = float(info.get("transportCost", 0.0))
+        entry.enabled = bool(info.get("enabled", True))
+
+    await session.commit()
+
+
+async def get_all_routes(session: AsyncSession) -> Sequence[DistanceTableEntry]:
+    """Obtiene todas las rutas de conectividad vigentes[cite: 26, 31]."""
+    stmt = select(DistanceTableEntry).order_by(
+        DistanceTableEntry.destination_code)
+    result = await session.execute(stmt)
+    return result.scalars().all()

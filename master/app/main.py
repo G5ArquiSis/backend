@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.database import create_schema
-from app.routers import health, history
+from app.routers import health, history, conexiones, interno
 
 
 @asynccontextmanager
@@ -19,3 +19,5 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="EnergyShark", version="0.1.0", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(history.router)
+app.include_router(conexiones.router)
+app.include_router(interno.router)

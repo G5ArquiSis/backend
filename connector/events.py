@@ -14,6 +14,8 @@ from pydantic.alias_generators import to_camel
 import json
 import uuid
 
+from typing import Any, Dict, Optional, Tuple
+
 
 VALID_TYPES = {
     "ack",
@@ -72,6 +74,25 @@ def construir_mensaje_nack(target, reason, code, mensaje, cycle_id: Optional[str
     return mensaje_nack
 
 
+def construir_mensaje_request(msg_type: str, city_code: str, data: Dict[str, Any], cycle_id: Optional[str] = None):
+
+    # Construye un mensaje de type request (ej: distance-table o status-statement)
+
+    mensaje = {
+        "idpk": str(uuid.uuid4()),
+        "msgId": str(uuid.uuid4()),
+        "type": msg_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cityId": city_code,
+        "data": data,
+    }
+
+    if cycle_id:
+        mensaje["cycleId"] = cycle_id
+
+    return mensaje
+
+
 def validacion_mensaje_entrante(body):
 
     # Retorna: (msg_dict, nack_dict, discard_reason)
@@ -89,6 +110,10 @@ def validacion_mensaje_entrante(body):
 
     if not isinstance(data, dict):
         return (None, None, "Envelope no es un objeto JSON")
+
+    # para continuar con lo realizado en la E0, se siguen recibiendo eventos para guardar en nuestra bdd
+    if data.get("type") == "demand-set" and "packageBody" in data:
+        return (data, None, None)
 
     msg_id = data.get("msgId")
 
@@ -136,6 +161,17 @@ def validacion_mensaje_entrante(body):
         return (None, construir_mensaje_nack(target, reason, code, mensaje, cycle_id), None)
 
     return (data, None, None)
+
+
+def construir_solicitud_directa(tipo_pedido: str, codigo_ciudad: str) -> Dict[str, Any]:
+
+    # Construye un mensaje de type request (ej: distance-table o status-statement)
+
+    return construir_mensaje_request(
+        msg_type="request",
+        city_code=codigo_ciudad,
+        data={"ask": tipo_pedido},
+    )
 
 
 class MalformedEventError(Exception):

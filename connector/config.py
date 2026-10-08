@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     broker_host: str
     broker_port: int = 5671
-    broker_user: str
+    broker_user: str = "city.TAL"
     broker_password: str
     broker_vhost: str = "/"
     broker_queue: str
@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     heartbeat_path: Path = Path("/tmp/connector-heartbeat")
     heartbeat_max_age_seconds: float = 120
 
-    city_code: str
+    city_code: str = "TAL"
 
     # El .env es compartido por los tres containers, así que las variables de
     # Postgres llegan acá aunque connector no las use.

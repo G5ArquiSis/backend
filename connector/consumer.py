@@ -21,6 +21,7 @@ import ssl
 from config import get_settings
 from master_client import MasterClient
 from events import validacion_mensaje_entrante, construir_mensaje_ack
+from heartbeat import record_heartbeat
 
 
 logger = logging.getLogger(__name__)
@@ -68,9 +69,9 @@ def procesar_mensaje_y_responder(
         # en este caso no hay nack, entonces no hay que mandar nada al broker
         # hay que registrar el log
 
-        master_client.record_log(
-            category="discarded",
-            raw_content=body.decode("utf-8", errors="replace"),
+        master_client.guardar_log_master(
+            categoria="discarded",
+            mensaje_evento=body.decode("utf-8", errors="replace"),
             reason=razon_descarte,
         )
 
@@ -84,14 +85,24 @@ def procesar_mensaje_y_responder(
         # hay que enviar el nack al broker para que reencole el mensaje
         publicar_mensaje_broker(canal, mensaje_nack, city_code)
 
+        master_client.guardar_log_master(
+            categoria="nack",
+            mensaje_evento=body.decode("utf-8", errors="replace"),
+            reason=mensaje_nack.get("reason"),
+            nack_code=mensaje_nack.get("code"),
+        )
+
         return
 
-    # mensaje valido, que tiene que enviar un ack
+    # mensaje valido, que tiene que enviar un ack.
+    # tambien hay que reenviarlo a master para que lo guarde en su bdd de eventos
+    master_client.enviar_evento_master(mensaje)
+
     msg_type_origen = mensaje.get("type")
     msg_id_origen = mensaje.get("msgId")
 
     # para no responder con un ack a un ack, nack o error
-    if msg_type_origen not in ["ack", "nack", "error"]:
+    if msg_type_origen not in ["ack", "nack", "error"] and msg_id_origen != None:
 
         mensaje_ack = construir_mensaje_ack(msg_id_origen, city_code)
         publicar_mensaje_broker(canal, mensaje_ack, city_code)
@@ -103,7 +114,10 @@ def conectar_broker(settings, master_client: MasterClient, nombre_cola: str):
         f"Conectando a RabbitMQ en {settings.broker_host}:{settings.broker_port}..."
     )
 
-    ssl_context = ssl.create_default_context()
+    ssl_options = None
+    if getattr(settings, "broker_use_ssl", True):
+        ssl_context = ssl.create_default_context()
+        ssl_options = pika.SSLOptions(ssl_context)
 
     credenciales = pika.PlainCredentials(
         settings.broker_user, settings.broker_password)
@@ -115,7 +129,7 @@ def conectar_broker(settings, master_client: MasterClient, nombre_cola: str):
         credentials=credenciales,
         heartbeat=30,
         blocked_connection_timeout=60,
-        ssl_options=pika.SSLOptions(ssl_context)
+        ssl_options=ssl_options
     )
 
     conexion_broker = pika.BlockingConnection(parametros)
@@ -124,11 +138,17 @@ def conectar_broker(settings, master_client: MasterClient, nombre_cola: str):
     canal.queue_declare(queue=nombre_cola, durable=True)
     canal.basic_qos(prefetch_count=10)
 
+    record_heartbeat()
+
     logger.info(f"Escuchando cola {nombre_cola}")
 
     for method_frame, properties, body in canal.consume(nombre_cola):
+        delivery_tag = method_frame.delivery_tag
+
         try:
-            procesar_mensaje(canal, body, master_client, settings.city_code)
+            procesar_mensaje_y_responder(
+                canal, body, master_client, settings.city_code)
+            record_heartbeat()
             canal.basic_ack(delivery_tag=method_frame.delivery_tag)
             # notifica al broker que el mensaje ya fue leido y retirado de la cola
 
@@ -141,7 +161,7 @@ def conectar_broker(settings, master_client: MasterClient, nombre_cola: str):
 def iniciar_broker():
 
     settings = get_settings()
-    master_client = MasterClient(settings.master_events_url)
+    master_client = MasterClient()
     nombre_cola = f"city.{settings.city_code}"
 
     while True:
@@ -151,11 +171,13 @@ def iniciar_broker():
         except pika.exceptions.AMQPConnectionError as e:
             logger.error(
                 f"Conexión con RabbitMQ perdida: {e}. Reintentando en 5 segundos...")
+            record_heartbeat()
             time.sleep(5)
 
         except Exception as e:
             logger.exception(
                 f"Error inesperado en consumer: {e}. Reintentando en 5 segundos...")
+            record_heartbeat()
             time.sleep(5)
 
 

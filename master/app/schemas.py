@@ -12,6 +12,8 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+from typing import List, Optional
+
 DEFAULT_PAGE_SIZE = 25  # RF3: el historial se pagina de a 25 por defecto.
 MAX_PAGE_SIZE = 100
 
@@ -50,7 +52,8 @@ class DemandEventIn(CamelCaseModel):
 class DemandEventOut(CamelCaseModel):
     """Evento tal como lo devuelve la API, con todos los campos guardados (RF1)."""
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, from_attributes=True)
+    model_config = ConfigDict(alias_generator=to_camel,
+                              populate_by_name=True, from_attributes=True)
 
     id: int
     idpk: str
@@ -90,3 +93,42 @@ class PaginatedHistory(CamelCaseModel):
     limit: int
     total: int
     pages: int
+
+
+class AuditLogCreate(BaseModel):
+    category: str
+    reason: Optional[str] = None
+    nack_code: Optional[int] = None
+    mensaje_evento: str
+
+
+class AuditLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    category: str
+    reason: Optional[str] = None
+    nack_code: Optional[int] = None
+    mensaje_evento: str
+    created_at: datetime
+
+
+class AuditLogListResponse(BaseModel):
+    items: List[AuditLogResponse]
+    total: int
+    page: int
+    limit: int
+
+
+class RouteConnectivity(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    destination_code: str
+    distance: float
+    transport_cost: float
+    enabled: bool
+    updated_at: Optional[datetime] = None
+
+
+class ConnectivityResponse(BaseModel):
+    routes: List[RouteConnectivity]
