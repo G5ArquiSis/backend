@@ -1,0 +1,203 @@
+# Ciclo de negociación: ledger, reporte y negociaciones
+
+Cómo `master` lleva el ledger, envía el `negotiation-report`, maneja las negociaciones
+voluntarias y registra lo que no se aplicó, y qué necesita de `connector` para que todo corra. Las decisiones están en los ADRs
+de [AD2](adr/0001-persistencia-ledger.md) y [AD3](adr/0003-timeouts-negociacion.md).
+
+## Reparto de responsabilidades
+
+```
+central ──► city.TAL.q ─► connector ──POST /internal/messages──► master ──► Postgres
+                             ▲                                     │
+                             └────── POST /internal/outbox/claim ──┘
+central ◄── publica ─────────┘
+```
+
+- **`connector` transporta.** Recibe de la central, valida el envelope, responde ACK o NACK,
+  reenvía el mensaje a `master` y publica lo que `master` le entrega. Atiende dos colas, cada
+  una con su conexión: la de la ciudad (`city.TAL.q`, protocolo de la E1) y la del observer
+  (`demand-set` de la E0, que sigue alimentando `/history`).
+- **`master` decide y persiste.** Aplica los mensajes al ledger, lleva el estado de cada
+  negociación y resuelve qué hay que enviar y cuándo.
+
+`master` no tiene temporizadores. Cada vez que `connector` consulta la outbox, `master` revisa en
+la base de datos los plazos vencidos y encola lo que corresponda. Por eso un reinicio no pierde
+el reporte de un ciclo ni una negociación en curso.
+
+## Qué confirma `connector` al broker
+
+| Situación | Al broker | A la central |
+|---|---|---|
+| `master` guardó el mensaje (o era un duplicado) | Lo confirma | ACK, salvo que sea un `ack`, `nack` o `error` |
+| `master` no responde o falla | Lo reencola | Nada: no se confirma lo que aún se puede perder |
+| El envelope es inválido, o `master` rechaza el contenido | Lo confirma | NACK, y queda en el registro |
+| No se puede parsear o no trae `msgId` | Lo confirma | Nada: no hay a quién responder; queda en el registro |
+
+Si se cae la conexión al broker, `connector` reintenta con espera creciente y sigue marcando su
+señal de vida: la API sigue sirviendo lo ya persistido, y los mensajes sin confirmar vuelven
+solos a la cola.
+
+## Contrato con `connector`
+
+Son cuatro llamadas HTTP a `master`, por la red de Docker (`http://master:8000`).
+
+### 1. Reenviar cada mensaje válido de la central
+
+```
+POST /internal/messages
+Content-Type: application/json
+
+<el mensaje completo, tal como llegó del broker>
+```
+
+| Respuesta | Significado | Qué hace `connector` |
+|---|---|---|
+| 200 `{"outcome": "applied"}` | Se aplicó | Confirmar el mensaje al broker |
+| 200 `{"outcome": "duplicate"}` | Ese `idpk` ya estaba aplicado; no cambió nada y quedó en el registro de duplicados | Confirmar el mensaje al broker |
+| 200 `{"outcome": "ignored"}` | El tipo no afecta al estado (`ack`, `request`, etc.) | Confirmar el mensaje al broker |
+| 422 | Le falta un campo que su tipo exige | Responder NACK a la central |
+| 5xx o sin respuesta | `master` no está disponible | Reencolar y reintentar; no confirmar |
+
+Se reenvían todos los tipos: `master` descarta los que no usa. El ACK del protocolo a la central
+lo sigue enviando `connector`; este endpoint no lo reemplaza.
+
+### 2. Retirar los mensajes por publicar
+
+```
+POST /internal/outbox/claim
+```
+
+Responde una lista, vacía si no hay nada:
+
+```json
+[{ "id": 12, "payload": { "idpk": "...", "msgId": "...", "type": "negotiation-report", "...": "..." } }]
+```
+
+`payload` es el mensaje completo, listo para publicar a la central con `user_id = city.TAL`. Hay
+que llamarlo **cada 5 segundos**, haya o no mensajes entrantes: es el reloj del sistema. Si deja
+de llamarse, no sale el reporte ni vencen los timeouts.
+
+### 3. Confirmar cada publicación
+
+```
+POST /internal/outbox/{id}/sent
+```
+
+Un mensaje retirado y no confirmado se vuelve a ofrecer a los 60 segundos. Así, si `connector`
+se cae entre retirar y publicar, el mensaje no se pierde. Publicar dos veces el mismo mensaje no
+hace daño: lleva el mismo `idpk`.
+
+### 4. Informar lo que no se aplicó
+
+```
+POST /internal/message-log
+Content-Type: application/json
+
+{ "category": "discarded" | "nack", "rawContent": "<cuerpo tal como llegó>", "reason": "MALFORMED_MESSAGE" }
+```
+
+`connector` lo llama cuando descarta un mensaje (no se pudo parsear o no trae `msgId`) y cuando
+responde NACK. `rawContent` es texto, porque un mensaje descartado puede no ser JSON. Los
+duplicados no se informan por acá: los registra `master` al detectarlos.
+
+## Qué hace `master` con cada mensaje
+
+| Tipo | Efecto |
+|---|---|
+| `status-statement` | Abre el ciclo, fija el balance de energía (`generationCapacity - consumption`) y programa el reporte |
+| `transfer` sin `becauseOf` | Suma `quantity` al presupuesto |
+| `demand-statement` | Suma `quantity` a la energía y resta `quantity × valuePerKwh` del presupuesto |
+| `take` | Confirma nuestra compra, la aplica al ledger y encola nuestro `transfer` de pago |
+| `give` | Confirma nuestra venta y abre el plazo de 30 segundos para recibir el pago |
+| `transfer` con `becauseOf` | Pago de una venta: recién acá se aplica al ledger |
+| `error`, `nack` | Rechaza la propuesta, o reprograma el reporte si es `REPORT_TOO_EARLY` |
+| `distance-table` | Guarda la tabla; la vigente es la última recibida |
+
+El presupuesto se traspasa entre ciclos: el `budgetBalance` que se reporta es la suma de todos
+los eventos. La energía es por ciclo.
+
+## El `negotiation-report`
+
+- Se programa al recibir el `status-statement`, para 15 segundos después de que abre el periodo
+  de cierre (`validUntil` menos 5 minutos).
+- Solo se envía por ciclos que la central abrió, y nunca después de `validUntil`.
+- Ante `REPORT_TOO_EARLY` se reenvía en `data.opensAt`, con el mismo `idpk`.
+- Si el ledger cambia después de reportar y la ventana sigue abierta, se envía una corrección
+  con un `idpk` nuevo.
+
+## API para la interfaz
+
+Entran por `https://api.melchort.me`, con el token de Auth0. Por `https://melchort.me` responden
+403.
+
+| Endpoint | Qué hace |
+|---|---|
+| `GET /cycles` | Ciclos del más reciente al más antiguo, con su balance y el presupuesto actual (RF01) |
+| `GET /cycles/{cycleId}` | Historial de un ciclo: `statusStatement`, `transfers`, `demandStatements`, `negotiations`, `report` y `balances`. `operations` trae todo en orden, y la última lleva `isLast: true` (RF01) |
+| `GET /connectivity` | La `distance-table` vigente: destino, distancia, `transportCost` y `enabled` (RF02) |
+| `GET /message-log` | Duplicados, descartados y NACK, paginados; filtra con `?category=duplicate\|discarded\|nack` (RF05) |
+| `POST /negotiations` | Crea una propuesta: `{"direction": "give" \| "take", "quantity": 300, "pricePerEnergy": 220.5}`. Sin precio, oferta el tope del ciclo. Responde 409 con el motivo si no hay ventana abierta, si el precio supera el tope o si un `give` excede la energía vendible |
+| `GET /negotiations` | Historial con estado: `pending`, `confirmed`, `paid`, `expired` o `rejected` |
+| `GET /negotiations/{id}` | Detalle, con el número de intentos y el motivo de rechazo |
+
+## Configuración
+
+Variables de `master`, documentadas en [`.env.example`](../.env.example): `CITY_CODE`,
+`REPORT_CLOSING_SECONDS`, `REPORT_MARGIN_SECONDS`, `NEGOTIATION_TIMEOUT_SECONDS`,
+`NEGOTIATION_MAX_ATTEMPTS` y `OUTBOX_REDELIVERY_SECONDS`. Todas tienen un valor por defecto.
+
+## Probarlo sin la central
+
+Con el stack local arriba, simulando a `connector`:
+
+```bash
+# 1. Abrir un ciclo cuya ventana cierra en 2 minutos
+curl -s -X POST http://127.0.0.1:8001/internal/messages -H 'content-type: application/json' -d '{
+  "idpk": "prueba-1", "msgId": "m-1", "type": "status-statement", "cycleId": "cycle-1",
+  "timestamp": "2026-01-01T00:00:00Z", "sender": "central",
+  "data": {"energy": {"generationCapacity": 1000, "consumption": 400, "generationCost": 210},
+           "validUntil": "'"$(date -u -d '+2 minutes' +%Y-%m-%dT%H:%M:%SZ)"'"}}'
+
+# 2. Retirar la outbox: trae el negotiation-report, porque el periodo de cierre ya abrió
+curl -s -X POST http://127.0.0.1:8001/internal/outbox/claim
+
+# 3. Ver el estado
+curl -s http://127.0.0.1:8001/cycles
+```
+
+## Datos del broker para la ciudad
+
+Los entrega el curso junto con la contraseña. Tres nombres se parecen y no son intercambiables:
+
+| Dato | Valor | Dónde se usa |
+|---|---|---|
+| Usuario | `city.TAL` | Autenticación y propiedad `user_id` de lo que publicamos |
+| Cola | `city.TAL.q` | Lo que consumimos; el usuario no tiene permisos sobre otro nombre |
+| Exchange | `energy.x` | A donde publicamos |
+| Routing key de la central | `central` | Con la que publicamos |
+| Virtual host | `energy` | El mismo del observer |
+
+La cola no se declara, ni en modo pasivo: el usuario de la ciudad no tiene permiso de
+configuración sobre ella y el broker cierra el canal con 403.
+
+## Cómo activarlo en producción
+
+`connector` consume la cola de la ciudad solo si existe `CITY_BROKER_PASSWORD` en el `.env` de
+la EC2. Sin ella sigue atendiendo únicamente la cola del observer. Para cargarla, por Session
+Manager, sin que la contraseña quede en el historial:
+
+```bash
+sudo bash -c 'read -rsp "Contraseña de city.TAL: " K && echo && printf "CITY_BROKER_PASSWORD=%s\n" "$K" >> /opt/energyshark/.env'
+cd /opt/energyshark && sudo docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml up -d --no-deps connector
+sudo docker logs -f energyshark-e1-connector-1     # debe decir "Escuchando la cola city.TAL.q"
+```
+
+`--no-deps` importa: el `.env` es compartido, y sin esa opción Compose también recrea Postgres y
+`master-1` porque su configuración cambió.
+
+## Lo que no cubre
+
+- La interfaz todavía no consume estos endpoints: las vistas del frontend usan datos de ejemplo.
+- Los endpoints no están en el OpenAPI del repo `contratos`.
+- El nombre de la tabla de RF05 es `message_log`, con una columna de categoría. El ADR de AD2 la
+  llamaba `duplicate_messages`; se generalizó para guardar también descartados y NACK.

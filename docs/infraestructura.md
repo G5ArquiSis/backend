@@ -11,7 +11,7 @@ push a main ─→ GitHub Actions (.github/workflows/deploy.yml)
                     (tags: <sha del commit> y latest)
                  3. SSM ─→ EC2: copia deploy/docker-compose.prod.yml a /opt/energyshark,
                                 escribe MASTER_IMAGE y CONNECTOR_IMAGE en release.env,
-                                docker compose pull + up --remove-orphans --wait,
+                                docker compose pull + up de a un servicio (ver abajo),
                                 instala deploy/nginx/energyshark-tls.conf si cambió (nginx -t + reload)
 
 frontend ─→ API Gateway (api.melchort.me, CORS) ─┐
@@ -30,6 +30,10 @@ internet ─→ Nginx en el host (TLS, melchort.me) ─→ 127.0.0.1:8001 master
 | https://app.melchort.me | El frontend (ver el runbook del repo `frontend`) |
 
 - La EC2 **nunca** construye imágenes ni necesita acceso a GitHub (RNF04).
+- **Sin corte de servicio:** las réplicas de `master` se actualizan de a una, y el deploy espera a
+  que cada una quede `healthy` antes de tocar la otra. Mientras una reinicia, Nginx envía el
+  tráfico a la otra. `connector` sí se reinicia en cada deploy de código.
+- **Un merge que solo toca `docs/` o archivos `.md` no despliega:** no cambia las imágenes.
 - GitHub entra a AWS con **OIDC**: credenciales temporales, sin access keys guardadas en el repo.
 - La EC2 descarga desde ECR y recibe comandos de SSM con su **rol IAM**; tampoco guarda credenciales.
 - Si falta configurar las variables del repo, el workflow corre los tests y se salta el deploy.
@@ -197,6 +201,46 @@ curl -i -X OPTIONS https://api.melchort.me/history \
 # 204 con access-control-allow-origin: https://app.melchort.me
 ```
 
+### 11. Autorizador JWT de Auth0 (RNF02)
+
+[`deploy/api-gateway/autorizador.sh`](../deploy/api-gateway/autorizador.sh) crea en la HTTP API un
+autorizador JWT que valida el token contra Auth0 (firma, issuer, audience y expiración) antes de
+pasar la request al backend. Necesita dos datos del tenant:
+
+```bash
+AUTH0_DOMAIN=xxxx.us.auth0.com AUTH0_AUDIENCE=https://api.melchort.me \
+  deploy/api-gateway/autorizador.sh
+```
+
+- Quedan protegidas todas las rutas `/{proxy+}`. Solo `GET /health` es pública.
+- El preflight de CORS (`OPTIONS`) no lleva token y lo sigue respondiendo el gateway.
+- `https://melchort.me` no pasa por el gateway y sigue público para las rutas de la E0
+  (`/history`, `/health`).
+- **Las rutas de la E1 no se pueden llamar saltándose el gateway.** El gateway agrega a cada
+  request el header `x-gateway-secret`, y Nginx responde 403 en `/negotiations`, `/cycles`,
+  `/connectivity` y `/message-log` si no coincide. `/internal/` responde 404 desde afuera: solo lo usa `connector`, por la red de Docker.
+
+El secreto no está en el repo. Vive en dos lugares y se crea una sola vez:
+
+```bash
+SECRETO=$(openssl rand -hex 24)
+# En la EC2 (Nginx lo lee con un include; sin este archivo, `nginx -t` falla):
+echo "set \$gateway_secret \"$SECRETO\";" | sudo tee /etc/nginx/energyshark-gateway-secret.conf
+sudo chmod 600 /etc/nginx/energyshark-gateway-secret.conf
+# En el gateway, sobre la integración de /{proxy+}:
+aws apigatewayv2 update-integration --api-id <api> --integration-id <integración> \
+  --request-parameters "{\"overwrite:header.x-gateway-secret\":\"$SECRETO\"}"
+```
+- Para quitar la autenticación: `SIN_AUTH=1 deploy/api-gateway/autorizador.sh`.
+
+Verificación:
+
+```bash
+curl -i https://api.melchort.me/health      # 200, sin token
+curl -i https://api.melchort.me/history     # 401, sin token
+curl -i https://api.melchort.me/history -H "Authorization: Bearer <token>"   # 200
+```
+
 ## Operación
 
 | Tarea | Cómo |
@@ -211,10 +255,4 @@ curl -i -X OPTIONS https://api.melchort.me/history \
 
 ## Pendiente
 
-- Autorizador JWT de Auth0 en las rutas del gateway (RNF02); requiere el issuer y la audience del
-  tenant.
-- Impedir que las rutas de la E1 se llamen por `https://melchort.me` saltándose el gateway (header
-  secreto que agrega el gateway y que Nginx exige). Las rutas de la E0 siguen públicas.
-- APM de New Relic en `master` (RNF05), en el PR #5. El agente de infraestructura ya está instalado
-  en la EC2 (G07).
 - Cerrar el puerto 22 del security group cuando todo se opere por SSM.

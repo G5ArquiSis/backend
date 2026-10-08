@@ -6,10 +6,11 @@ DemandEvent para compatibilidad con la E0.
 """
 
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
@@ -48,127 +49,152 @@ class DemandEvent(Base):
     )
 
 
-class CycleLedger(Base):
-    """Estado y snapshot proyectado de un ciclo de negociación (ADR-0002 / RF01 / RF03).
-
-    Almacena los parámetros informados por status-statement (capacidad, consumo, costo),
-    los balances acumulados actuales de presupuesto (traspasado entre ciclos) y energía
-    (que expira al cierre), y la referencia a la última operación aplicada para lecturas O(1).
-    """
-
-    __tablename__ = "cycle_ledger"
-
-    cycle_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    generation_capacity: Mapped[int] = mapped_column(Integer, default=0)
-    consumption: Mapped[int] = mapped_column(Integer, default=0)
-    generation_cost: Mapped[float] = mapped_column(Float, default=0.0)
-    budget_balance: Mapped[float] = mapped_column(Float, default=0.0)
-    energy_balance: Mapped[int] = mapped_column(Integer, default=0)
-    total_transferred_budget: Mapped[float] = mapped_column(Float, default=0.0)
-    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_operation_idpk: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    is_closed: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    # Datos reportados a la central en negotiation-report
-    report_budget_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
-    report_energy_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    report_submitted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-    # Relaciones con eventos y propuestas del ciclo
-    events: Mapped[list["LedgerEvent"]] = relationship(
-        "LedgerEvent", back_populates="cycle", cascade="all, delete-orphan", order_by="LedgerEvent.applied_at"
-    )
-    negotiations: Mapped[list["VoluntaryNegotiation"]] = relationship(
-        "VoluntaryNegotiation", back_populates="cycle", cascade="all, delete-orphan", order_by="VoluntaryNegotiation.created_at"
-    )
+# Los montos son dinero y la energía admite decimales: NUMERIC evita los errores de
+# representación de un float al acumular deltas.
+_Amount = Numeric(20, 2)
+_Energy = Numeric(20, 4)
 
 
 class LedgerEvent(Base):
-    """Event Log inmutable de operaciones aplicadas sobre el ledger (ADR-0002 / RF01 / RF05).
+    """Una operación aplicada al ledger: la fuente de verdad, inmutable (ADR de AD2).
 
-    Es la fuente única de verdad auditable. Garantiza que cualquier ciclo histórico
-    sea 100% reconstruible y explicable paso a paso.
-    La restricción de unicidad en `idpk` garantiza idempotencia a nivel de base de datos.
+    `idpk` es único: aplicar dos veces la misma operación es imposible a nivel de
+    base de datos, sin depender de que el código consulte antes de insertar.
     """
 
     __tablename__ = "ledger_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     idpk: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    msg_id: Mapped[str] = mapped_column(String(64), index=True)
-    cycle_id: Mapped[str] = mapped_column(String(64), ForeignKey("cycle_ledger.cycle_id"), index=True)
-    event_type: Mapped[str] = mapped_column(String(32), index=True)  # status-statement, transfer, demand-statement, give, take, report
-    delta_budget: Mapped[float] = mapped_column(Float, default=0.0)
-    delta_energy: Mapped[int] = mapped_column(Integer, default=0)
-    resulting_budget: Mapped[float] = mapped_column(Float, default=0.0)
-    resulting_energy: Mapped[int] = mapped_column(Integer, default=0)
+    cycle_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    energy_delta: Mapped[Decimal] = mapped_column(_Energy, default=Decimal(0))
+    budget_delta: Mapped[Decimal] = mapped_column(_Amount, default=Decimal(0))
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    applied_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
-    )
-
-    cycle: Mapped["CycleLedger"] = relationship("CycleLedger", back_populates="events")
-
-    __table_args__ = (
-        Index("ix_ledger_events_cycle_applied", "cycle_id", "applied_at"),
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class DuplicateMessage(Base):
-    """Registro consultable de mensajes duplicados o rechazados (RF05 / Anomalía 1 de la demo).
+class CycleLedger(Base):
+    """Proyección del estado de un ciclo, actualizada junto con cada evento.
 
-    Registra cualquier mensaje entrante cuyo `idpk` ya haya sido procesado previamente,
-    así como mensajes rechazados con NACK, permitiendo auditar y demostrar al ayudante
-    que el ledger no se altera dos veces.
+    También guarda la programación del negotiation-report: el instante de envío se
+    calcula desde `valid_until`, que está persistido, y no desde un temporizador en
+    memoria (ADR de AD3).
     """
 
-    __tablename__ = "duplicate_messages"
+    __tablename__ = "cycle_ledger"
+
+    cycle_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # True desde que llega el status-statement: solo se debe reporte por un ciclo
+    # en el que la central abrió la ventana.
+    opened: Mapped[bool] = mapped_column(Boolean, default=False)
+    generation_capacity: Mapped[Decimal | None] = mapped_column(_Energy, nullable=True)
+    consumption: Mapped[Decimal | None] = mapped_column(_Energy, nullable=True)
+    generation_cost: Mapped[Decimal | None] = mapped_column(_Amount, nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    energy_balance: Mapped[Decimal] = mapped_column(_Energy, default=Decimal(0))
+    # Suma de los deltas de presupuesto de este ciclo. El presupuesto se traspasa
+    # entre ciclos, así que el balance que se reporta es la suma de todos los eventos.
+    budget_delta: Mapped[Decimal] = mapped_column(_Amount, default=Decimal(0))
+    last_operation_idpk: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    report_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    report_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    report_idpk: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    report_msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reported_budget: Mapped[Decimal | None] = mapped_column(_Amount, nullable=True)
+    reported_energy: Mapped[Decimal | None] = mapped_column(_Energy, nullable=True)
+    report_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Negotiation(Base):
+    """Una negociación voluntaria y el estado de su máquina de estados (ADR de AD3)."""
+
+    __tablename__ = "negotiations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    idpk: Mapped[str] = mapped_column(String(64), index=True)
-    msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    event_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    reason: Mapped[str] = mapped_column(String(64))  # DUPLICATE_IDPK, MALFORMED_MESSAGE, etc.
-    details: Mapped[dict] = mapped_column(JSONB, default=dict)
-    detected_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
-    )
-
-
-class VoluntaryNegotiation(Base):
-    """Registro del ciclo de vida de negociaciones voluntarias (RF04 / RF01 / AD3).
-
-    Rastrea propuestas enviadas/recibidas, su confirmación (give/take) y pago (transfer).
-    """
-
-    __tablename__ = "voluntary_negotiations"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    proposal_idpk: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    cycle_id: Mapped[str] = mapped_column(String(64), ForeignKey("cycle_ledger.cycle_id"), index=True)
-    direction: Mapped[str] = mapped_column(String(16))  # 'give' o 'take'
-    quantity: Mapped[int] = mapped_column(Integer)
-    price_per_energy: Mapped[float] = mapped_column(Float)
-    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)  # pending, confirmed, paid, expired
-    confirmation_msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    transfer_msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    total_amount: Mapped[float] = mapped_column(Float, default=0.0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    # Identifica la operación: se conserva en cada reintento.
+    idpk: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    cycle_id: Mapped[str] = mapped_column(String(64), index=True)
+    direction: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[Decimal] = mapped_column(_Energy)
+    price_per_energy: Mapped[Decimal] = mapped_column(_Amount)
+    state: Mapped[str] = mapped_column(String(16), index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=1)
+    # msgId de cada envío: una respuesta tardía al primer intento también calza.
+    msg_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmation_msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    confirmed_energy: Mapped[Decimal | None] = mapped_column(_Energy, nullable=True)
+    confirmed_price: Mapped[Decimal | None] = mapped_column(_Amount, nullable=True)
+    amount: Mapped[Decimal | None] = mapped_column(_Amount, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    cycle: Mapped["CycleLedger"] = relationship("CycleLedger", back_populates="negotiations")
+    __table_args__ = (Index("ix_negotiations_msg_ids", "msg_ids", postgresql_using="gin"),)
+
+
+class OutboxMessage(Base):
+    """Un mensaje por publicar a la central, que connector retira y envía.
+
+    `dedupe_key` es único: dos réplicas de master que decidan lo mismo a la vez
+    (enviar el reporte de un ciclo, reintentar una propuesta) dejan una sola fila.
+    """
+
+    __tablename__ = "outbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dedupe_key: Mapped[str] = mapped_column(String(128), unique=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MessageLog(Base):
+    """Mensajes que no se aplicaron: duplicados, descartados y respondidos con NACK (RF05).
+
+    Los duplicados los registra master al detectar un idpk ya aplicado. Los
+    descartados y los NACK los informa connector, que es quien valida el envelope.
+    """
+
+    __tablename__ = "message_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category: Mapped[str] = mapped_column(String(16), index=True)
+    # Nulos cuando el mensaje no se pudo parsear: no hay de dónde sacarlos.
+    idpk: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    msg_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    message_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Texto y no JSONB: un mensaje descartado puede no ser JSON válido.
+    raw_content: Mapped[str] = mapped_column(Text)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_message_log_received_at", "received_at"),)
+
+
+class DistanceTable(Base):
+    """Una distance-table recibida de la central; la vigente es la más reciente (RF02)."""
+
+    __tablename__ = "distance_tables"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idpk: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    distances: Mapped[dict] = mapped_column(JSONB, default=dict)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+# Alias de compatibilidad
+DuplicateMessage = MessageLog
+VoluntaryNegotiation = Negotiation
