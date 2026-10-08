@@ -6,7 +6,7 @@ un mensaje lo resuelve events.py, y qué hacer con él, master_client.py.
 connector atiende dos colas, cada una con su conexión y su hilo:
 
 - La del observer, con los demand-set de la E0, que se reenvían a POST /events.
-- La de la ciudad (city.{CODE}), con el protocolo de la E1: valida, responde ACK
+- La de la ciudad (city.{CODE}.q), con el protocolo de la E1: valida, responde ACK
   o NACK, entrega el mensaje a master y publica lo que master tiene pendiente.
 
 Política de confirmación al broker, que es lo que sostiene RNF1 y AD1:
@@ -72,7 +72,7 @@ def main() -> None:
     observer.start()
 
     if not settings.city_broker_password:
-        logger.warning("Sin CITY_BROKER_PASSWORD: no se consume %s", settings.city_identity)
+        logger.warning("Sin CITY_BROKER_PASSWORD: no se consume %s", settings.city_queue_name)
         observer.join()
         return
 
@@ -130,8 +130,8 @@ def consume_forever(
 
 
 def serve_city_queue(channel: BlockingChannel, master: MasterClient, settings: Settings) -> None:
-    """Consume city.{CODE} y, entre mensaje y mensaje, publica lo pendiente de master."""
-    queue = settings.city_identity
+    """Consume la cola de la ciudad y, entre mensaje y mensaje, publica lo pendiente de master."""
+    queue = settings.city_queue_name
     # Con confirmaciones del broker, publicar a un destino que no existe levanta una
     # excepción en vez de perder el mensaje en silencio.
     channel.confirm_delivery()

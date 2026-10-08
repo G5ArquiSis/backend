@@ -18,6 +18,7 @@ class FakeChannel:
         self.published: list[dict] = []
         self.user_ids: list[str] = []
         self.routing_keys: list[str] = []
+        self.exchanges: list[str] = []
         self.acked: list[int] = []
         self.requeued: list[int] = []
         self._publish_error = publish_error
@@ -28,6 +29,7 @@ class FakeChannel:
         self.published.append(json.loads(body))
         self.user_ids.append(properties.user_id)
         self.routing_keys.append(routing_key)
+        self.exchanges.append(exchange)
 
     def basic_ack(self, delivery_tag: int) -> None:
         self.acked.append(delivery_tag)

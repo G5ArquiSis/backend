@@ -50,7 +50,8 @@ def test_valid_message_is_stored_then_acked_to_the_central(master_with) -> None:
     [ack] = channel.published
     assert (ack["type"], ack["data"]["target"], ack["cityId"]) == ("ack", "msg-1", "TAL")
     assert channel.user_ids == ["city.TAL"]
-    assert channel.routing_keys == [SETTINGS.central_routing_key]
+    assert channel.routing_keys == ["central"]
+    assert channel.exchanges == ["energy.x"]
 
 
 def test_duplicate_reported_by_master_is_still_acked(master_with) -> None:
@@ -261,6 +262,7 @@ class ScriptedChannel(FakeChannel):
         super().__init__()
         self._deliveries = deliveries
         self.declared: list[tuple[str, bool]] = []
+        self.consumed: list[str] = []
         self.confirms_enabled = False
 
     def confirm_delivery(self) -> None:
@@ -273,6 +275,7 @@ class ScriptedChannel(FakeChannel):
         self.declared.append((queue, passive))
 
     def consume(self, queue: str, inactivity_timeout: float):
+        self.consumed.append(queue)
         for tag, body in enumerate(self._deliveries, start=1):
             if body is None:
                 yield (None, None, None)
@@ -298,6 +301,8 @@ def test_outbox_is_polled_even_when_no_messages_arrive(master_with, monkeypatch)
     # La cola es de la central y la ciudad no tiene permiso de configuración: no se
     # declara, ni en modo pasivo (el broker respondería 403 y cerraría el canal).
     assert channel.declared == []
+    # La cola lleva el sufijo .q; el usuario, no.
+    assert channel.consumed == ["city.TAL.q"]
     assert channel.confirms_enabled is True
 
 

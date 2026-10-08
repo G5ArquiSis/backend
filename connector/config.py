@@ -21,12 +21,15 @@ class Settings(BaseSettings):
     broker_queue: str
 
     # Credenciales de la ciudad: el usuario es city.{CODE}, la misma cadena que se usa
-    # como nombre de cola y como user_id al publicar. Sin contraseña, el consumo de la
-    # ciudad queda apagado y connector sigue atendiendo solo la E0.
+    # como user_id al publicar. Sin contraseña, el consumo de la ciudad queda apagado y
+    # connector sigue atendiendo solo la E0.
     city_code: str = "TAL"
     city_broker_password: str = ""
-    # Dónde se publica lo que va a la central.
-    central_exchange: str = ""
+    # Cola de la ciudad. Vacía, se usa city.{CODE}.q, que es como la nombra el curso
+    # (igual que observer.N.q): el usuario no tiene permisos sobre otro nombre.
+    city_queue: str = ""
+    # Dónde se publica lo que va a la central: el exchange del curso y su routing key.
+    central_exchange: str = "energy.x"
     central_routing_key: str = "central"
     # Cada cuánto se le pide a master lo pendiente por publicar. Es el reloj del ciclo.
     outbox_poll_seconds: float = 5
@@ -46,8 +49,13 @@ class Settings(BaseSettings):
 
     @property
     def city_identity(self) -> str:
-        """Usuario del broker, cola y user_id de la ciudad: una sola cadena para los tres."""
+        """Usuario del broker y user_id de la ciudad; también es su routing key."""
         return f"city.{self.city_code}"
+
+    @property
+    def city_queue_name(self) -> str:
+        """Nombre de la cola de la ciudad, que no es igual al usuario: lleva el sufijo .q."""
+        return self.city_queue or f"{self.city_identity}.q"
 
 
 @lru_cache
