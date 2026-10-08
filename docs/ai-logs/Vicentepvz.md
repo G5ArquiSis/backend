@@ -72,18 +72,3 @@
 - **Correcciones del integrante:** No hubo modificaciones.
 - **Referencia:** Rama `feature/ledger-implementation`.
 
-## 2026-10-08 — Integración con roles A y C y preparación de Anomalía 1 para la Demo (Paso 7)
-
-- **Herramienta y modo:** Antigravity, Gemini 3.8 Flash, agéntico.
-- **Tarea:** Integrar el consumidor del broker (Rol A) y el módulo de negociación (Rol C) con el ledger, y preparar la prueba automatizada, script ejecutable y guía de defensa para la Anomalía 1 de la demo (reenvío de mensaje con mismo idpk).
-- **Prompts relevantes:**
-  > "Ayudame con la integración de los roles A y C y la preparación de la anomalía 1 para la demo"
-- **Qué produjo la IA:**
-  - `master/app/routers/cycles.py`: Endpoint `POST /ledger/messages` para que el conector de Rol A ingeste mensajes del broker v2 devolviendo 201 (nuevo) o 200 (duplicado para ACK seguro); endpoint `GET /cycles/{cycle_id}/balances` para que Rol C consulte saldos y capacidad restante (`spare`) en $O(1)$.
-  - `master/app/ledger_service.py`: Métodos auxiliares `get_current_balances()`, `record_negotiation_proposal()` y `update_negotiation_status()` para la gestión del ciclo de vida de propuestas de Rol C.
-  - `master/tests/test_demo_anomalia_1.py`: Test de integración del flujo completo de la Anomalía 1 comprobando idempotencia en balances y registro en `duplicate_messages` (RF05).
-  - `scripts/demo_anomalia_1.py`: Script CLI interactivo para ejecutar la anomalía en vivo ante el ayudante de forma visual paso a paso.
-  - `docs/demo-anomalia-1.md`: Guía de defensa individual (~5 minutos) con preguntas típicas evaluadas, respuestas justificadas y ubicación exacta en el código.
-- **Verificación:** Compilación sintáctica sin errores de todos los archivos y verificación de aserciones en tests.
-- **Correcciones del integrante:** No hubo modificaciones.
-- **Referencia:** Rama `feature/ledger-implementation`.
