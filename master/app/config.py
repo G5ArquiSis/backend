@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     negotiation_max_attempts: int = 3
     # Tras este tiempo sin confirmación de envío, un mensaje retirado vuelve a ofrecerse.
     outbox_redelivery_seconds: int = 60
+    # Petición directa del status-statement de un ciclo del que la central habló sin
+    # mandarlo: margen antes de pedirlo, espera entre pedidos y tope de pedidos.
+    statement_request_grace_seconds: int = 30
+    statement_request_interval_seconds: int = 120
+    statement_request_max_attempts: int = 3
 
     # El .env es compartido por los tres containers, así que las variables del
     # broker llegan acá aunque master no las use.

@@ -336,6 +336,71 @@ async def test_ledger_change_after_reporting_sends_a_correction_with_a_new_idpk(
     assert correction["idpk"] != first["idpk"]
 
 
+# --- Peticiones directas ---------------------------------------------------------------
+
+GRACE = timedelta(seconds=SETTINGS.statement_request_grace_seconds)
+INTERVAL = timedelta(seconds=SETTINGS.statement_request_interval_seconds)
+
+
+def asks(payloads: list[dict]) -> list[str]:
+    return [payload["data"]["ask"] for payload in payloads if payload["type"] == "request"]
+
+
+async def test_missing_status_statement_is_requested_after_a_grace_period(
+    db: AsyncSession,
+) -> None:
+    """La central habló de un ciclo sin mandar su estado: se pide, como exige el enunciado."""
+    await apply(db, central("transfer", "transfer-1", {"quantity": 1000}))
+
+    assert await outbox_at(db, WINDOW_START + GRACE - timedelta(seconds=1)) == []
+    [request, distances] = await outbox_at(db, WINDOW_START + GRACE)
+
+    assert (request["type"], request["data"]) == ("request", {"ask": "status-statement"})
+    assert request["cityId"] == "TAL"
+    assert "cycleId" not in request
+    assert request["idpk"] != request["msgId"]
+    assert asks([distances]) == ["distance-table"]
+
+
+async def test_status_statement_requests_are_spaced_and_capped(db: AsyncSession) -> None:
+    """Pedir de nuevo enseguida no cambia la respuesta y la política de abuso lo castiga."""
+    await apply(db, central("transfer", "transfer-1", {"quantity": 1000}))
+    first = WINDOW_START + GRACE
+
+    sent = []
+    for second in range(0, int(INTERVAL.total_seconds()) * 6, 10):
+        sent += asks(await outbox_at(db, first + timedelta(seconds=second)))
+
+    assert sent.count("status-statement") == SETTINGS.statement_request_max_attempts
+
+
+async def test_status_statement_is_not_requested_once_it_arrived(db: AsyncSession) -> None:
+    await apply(db, central("transfer", "transfer-1", {"quantity": 1000}))
+    await apply(db, status_statement(), WINDOW_START + timedelta(seconds=5))
+
+    assert await outbox_at(db, WINDOW_START + GRACE) == []
+
+
+async def test_distance_table_is_not_requested_when_one_is_stored(db: AsyncSession) -> None:
+    await apply(db, central("distance-table", "distances-1", {"distances": {}}, None))
+    await apply(db, central("transfer", "transfer-1", {"quantity": 1000}))
+
+    assert asks(await outbox_at(db, WINDOW_START + GRACE)) == ["status-statement"]
+
+
+async def test_both_replicas_checking_at_once_send_a_single_request(db: AsyncSession) -> None:
+    await apply(db, central("distance-table", "distances-1", {"distances": {}}, None))
+    await apply(db, central("transfer", "transfer-1", {"quantity": 1000}))
+
+    async def from_another_replica() -> list[dict]:
+        async with _session_factory() as other:
+            return await outbox_at(other, WINDOW_START + GRACE)
+
+    batches = await asyncio.gather(*(from_another_replica() for _ in range(4)))
+
+    assert sum(len(batch) for batch in batches) == 1
+
+
 # --- Negociación voluntaria ------------------------------------------------------------
 
 
@@ -735,11 +800,14 @@ async def test_budget_at_close_of_a_past_cycle_ignores_later_cycles(
     """AD2: el estado de un ciclo pasado se reconstruye sin mezclar lo que vino después."""
     await apply(db, status_statement())
     await apply(db, central("transfer", "transfer-1", {"quantity": 1000}))
+    # El ciclo siguiente abre dos horas después: el orden de los ciclos es el de su llegada.
+    next_window = WINDOW_START + timedelta(hours=2)
     await apply(
         db,
         status_statement("status-2", "cycle-9432", valid_until=VALID_UNTIL + timedelta(hours=2)),
+        next_window,
     )
-    await apply(db, central("transfer", "transfer-2", {"quantity": 250}, "cycle-9432"))
+    await apply(db, central("transfer", "transfer-2", {"quantity": 250}, "cycle-9432"), next_window)
 
     past = (await client.get(f"/cycles/{CYCLE}")).json()
     latest = (await client.get("/cycles/cycle-9432")).json()

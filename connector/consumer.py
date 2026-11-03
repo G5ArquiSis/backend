@@ -204,6 +204,12 @@ def process_city_message(
         outcome = master.enviar_evento_master(message)
     except MessageRejectedError as error:
         # El envelope estaba bien, pero al contenido le falta algo que su tipo exige.
+        if message["type"] in TYPES_WITHOUT_ACK:
+            # Tampoco hay NACK de un ACK, de un NACK ni de un error: solo queda el registro.
+            logger.warning("%s inválido, se descarta sin responder: %s", message["type"], error)
+            reason = f"Contenido inválido para {message['type']}: {error}"[:300]
+            master.guardar_log_master("discarded", _as_text(body), reason)
+            return
         cycle_id = message.get("cycleId")
         nack = construir_mensaje_nack(
             message["msgId"],
