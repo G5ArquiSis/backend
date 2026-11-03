@@ -135,6 +135,40 @@ def test_content_rejected_by_master_gets_a_nack(master_with) -> None:
     assert channel.acked == [7]
 
 
+@pytest.mark.parametrize("message_type", ["ack", "nack", "error"])
+def test_reply_rejected_by_master_is_logged_but_never_nacked(
+    master_with, message_type: str
+) -> None:
+    """No hay NACK de un ACK, de un NACK ni de un error: se descarta y queda en el registro."""
+    master = RecordingMaster({MESSAGES: httpx.Response(422, json={"detail": "falta target"})})
+    channel = FakeChannel()
+
+    deliver(channel, master_with(master), central_message(message_type, data={}))
+
+    assert channel.published == []
+    [logged] = master.bodies(LOG)
+    assert logged["category"] == "discarded"
+    assert channel.acked == [7]
+
+
+@pytest.mark.parametrize("message_type", ["ack", "nack", "error"])
+def test_malformed_reply_envelope_is_logged_but_never_nacked(
+    master_with, message_type: str
+) -> None:
+    """Un envelope inválido de un ACK, NACK o error tampoco se responde: solo se registra."""
+    master = RecordingMaster()
+    channel = FakeChannel()
+
+    deliver(channel, master_with(master), central_message(message_type, idpk="msg-1"))
+
+    assert channel.published == []
+    assert master.bodies(MESSAGES) == []
+    [logged] = master.bodies(LOG)
+    assert logged["category"] == "discarded"
+    assert "IDPK_EQUALS_MSGID" in logged["reason"]
+    assert channel.acked == [7]
+
+
 def test_unparseable_message_is_discarded_and_logged_without_reply(master_with) -> None:
     """Anomalía 2: sin msgId no hay a quién responder; se registra y no se reencola."""
     master = RecordingMaster()

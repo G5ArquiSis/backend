@@ -112,7 +112,13 @@ def validacion_mensaje_entrante(
     if not msg_id or not isinstance(msg_id, str):
         return (None, None, "El mensaje no incluye msgId")
 
-    def nack(reason: str, code: int, mensaje: str) -> tuple[None, dict[str, Any], None]:
+    def nack(
+        reason: str, code: int, mensaje: str
+    ) -> tuple[None, dict[str, Any] | None, str | None]:
+        msg_type = data.get("type")
+        if msg_type in TYPES_WITHOUT_ACK:
+            # No se hace NACK de un ACK, de un NACK ni de un error: se descarta y se registra.
+            return (None, None, f"{reason}: {mensaje} (no se responde a un {msg_type})")
         cycle_id = data.get("cycleId")
         return (
             None,

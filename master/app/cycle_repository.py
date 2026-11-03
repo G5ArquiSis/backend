@@ -132,7 +132,7 @@ async def _apply_status_statement(
         seconds=settings.report_closing_seconds - settings.report_margin_seconds
     )
 
-    await _ensure_cycle(session, cycle_id)
+    await _ensure_cycle(session, cycle_id, now)
     # Abrir el ciclo es condicional: un segundo status-statement del mismo ciclo,
     # aunque traiga otro idpk, no vuelve a sumar la energía inicial.
     opened = await session.execute(
@@ -168,7 +168,7 @@ async def _apply_transfer(
         return await _apply_give_payment(session, message, because_of)
 
     cycle_id = message["cycleId"]
-    await _ensure_cycle(session, cycle_id)
+    await _ensure_cycle(session, cycle_id, now)
     recorded = await _record_event(
         session,
         message,
@@ -188,7 +188,7 @@ async def _apply_demand_statement(
         _decimal(balance["quantity"]), _decimal(balance["valuePerKwh"])
     )
 
-    await _ensure_cycle(session, cycle_id)
+    await _ensure_cycle(session, cycle_id, now)
     recorded = await _record_event(session, message, cycle_id, energy_delta, budget_delta)
     return APPLIED if recorded else DUPLICATE
 
@@ -369,6 +369,7 @@ async def run_due_work(session: AsyncSession, now: datetime, settings: Settings)
     await _send_due_reports(session, now, settings)
     await _correct_stale_reports(session, now, settings)
     await _retry_or_expire_negotiations(session, now, settings)
+    await _request_missing_statements(session, now, settings)
     await session.commit()
 
 
@@ -455,6 +456,55 @@ async def _retry_or_expire_negotiations(
         envelope = _proposal_envelope(negotiation, now, settings)
         negotiation.msg_ids = [*negotiation.msg_ids, envelope["msgId"]]
         await _enqueue(session, f"proposal:{negotiation.id}:{negotiation.attempts}", envelope)
+
+
+async def _request_missing_statements(
+    session: AsyncSession, now: datetime, settings: Settings
+) -> None:
+    """Pide el status-statement de un ciclo del que la central habló sin mandarlo.
+
+    El enunciado lo exige: el estado y las tablas de transmisión llegan al abrir la
+    ventana y, "de no recibirlas, deben solicitarlas". Solo se piden para ciclos que la
+    central nombró (por ejemplo, con su `transfer`): si no habló de un ciclo, no se le
+    debe reporte. Los pedidos se separan y tienen tope, porque repetirlos no cambia la
+    respuesta y la política de abuso del broker castiga los loops.
+
+    El conteo vive en la outbox, un `dedupe_key` por intento: no hace falta otra
+    columna, y dos réplicas que decidan el mismo intento dejan una sola fila.
+    """
+    grace = timedelta(seconds=settings.statement_request_grace_seconds)
+    interval = timedelta(seconds=settings.statement_request_interval_seconds)
+    max_attempts = settings.statement_request_max_attempts
+    unopened = await session.execute(
+        select(CycleLedger)
+        .where(
+            CycleLedger.opened.is_(False),
+            CycleLedger.created_at <= now - grace,
+            CycleLedger.created_at > now - grace - interval * max_attempts,
+        )
+        .with_for_update(skip_locked=True)
+    )
+    for cycle in unopened.scalars().all():
+        prefix = f"request:status-statement:{cycle.cycle_id}:"
+        sent = await session.scalar(
+            select(func.count())
+            .select_from(OutboxMessage)
+            .where(OutboxMessage.dedupe_key.startswith(prefix))
+        )
+        due = min(int((now - cycle.created_at - grace) / interval) + 1, max_attempts)
+        if sent >= due:
+            continue
+
+        attempt = sent + 1
+        await _enqueue(
+            session, f"{prefix}{attempt}", _request_envelope("status-statement", now, settings)
+        )
+        if await current_distance_table(session) is None:
+            await _enqueue(
+                session,
+                f"request:distance-table:{cycle.cycle_id}:{attempt}",
+                _request_envelope("distance-table", now, settings),
+            )
 
 
 # --- Outbox ----------------------------------------------------------------------------
@@ -700,8 +750,12 @@ async def total_budget(session: AsyncSession) -> Decimal:
 # --- Piezas internas -------------------------------------------------------------------
 
 
-async def _ensure_cycle(session: AsyncSession, cycle_id: str) -> None:
-    """Crea la fila del ciclo si no existe; el primer mensaje que llega la abre."""
+async def _ensure_cycle(session: AsyncSession, cycle_id: str, now: datetime) -> None:
+    """Crea la fila del ciclo si no existe; el primer mensaje que llega la abre.
+
+    `created_at` es el instante en que la central habló por primera vez del ciclo:
+    desde ahí corre el plazo para pedir su status-statement si no llega.
+    """
     await session.execute(
         postgres_insert(CycleLedger)
         .values(
@@ -709,6 +763,7 @@ async def _ensure_cycle(session: AsyncSession, cycle_id: str) -> None:
             opened=False,
             energy_balance=Decimal(0),
             budget_delta=Decimal(0),
+            created_at=now,
         )
         .on_conflict_do_nothing(index_elements=["cycle_id"])
     )
@@ -798,6 +853,18 @@ def _envelope(
         "cityId": settings.city_code,
         "cycleId": cycle_id,
         "data": data,
+    }
+
+
+def _request_envelope(ask: str, now: datetime, settings: Settings) -> dict:
+    """Petición directa a la central: no está ligada a un ciclo, así que no lleva cycleId."""
+    return {
+        "idpk": str(uuid.uuid4()),
+        "msgId": str(uuid.uuid4()),
+        "type": "request",
+        "timestamp": now.isoformat().replace("+00:00", "Z"),
+        "cityId": settings.city_code,
+        "data": {"ask": ask},
     }
 
 
