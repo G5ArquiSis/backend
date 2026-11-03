@@ -95,7 +95,7 @@ archivos, ejecutó los comandos de AWS y GitHub y abrió los PRs. Los commits co
 - **Qué produjo la IA:** la sección "Registro de uso de IA" de `contratos/AGENTS.md`, la carpeta
   `docs/ai-logs/` con su plantilla y este archivo.
 - **Verificación:** revisión de los enlaces entre documentos.
-- **Correcciones del integrante:** <!-- completar al revisar la propuesta -->
+- **Correcciones del integrante:**
 - **Referencia:** rama `docs/formato-ai-logs` en los tres repos.
 
 ## 2026-10-06 — API Gateway y subdominios
@@ -163,7 +163,7 @@ archivos, ejecutó los comandos de AWS y GitHub y abrió los PRs. Los commits co
   ejecutó contra un `master` real por HTTP, con un canal AMQP simulado: aplica, detecta el
   duplicado, responde NACK, registra el descarte y publica el reporte. No se probó contra el
   broker del curso: la conexión con `pika` y el destino de publicación quedan por confirmar.
-- **Correcciones del integrante:** <!-- completar -->
+- **Correcciones del integrante:**
 - **Referencia:** PR #7.
 
 ## 2026-11-03 — Completar RF03: peticiones directas y sin NACK de respuestas
@@ -187,5 +187,5 @@ archivos, ejecutó los comandos de AWS y GitHub y abrió los PRs. Los commits co
 - **Verificación:** 114 tests pasan contra un Postgres real (`ruff` limpio). El script de la
   anomalía 1 se corrió contra un `master` local: el reenvío responde `duplicate`, los balances no
   cambian y el duplicado aparece en `/message-log`.
-- **Correcciones del integrante:** <!-- completar al revisar -->
+- **Correcciones del integrante:**
 - **Referencia:** rama `feat/rf03-request-y-no-nack`.
