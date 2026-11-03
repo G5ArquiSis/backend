@@ -189,3 +189,30 @@ archivos, ejecutó los comandos de AWS y GitHub y abrió los PRs. Los commits co
   cambian y el duplicado aparece en `/message-log`.
 - **Correcciones del integrante:** <!-- completar al revisar -->
 - **Referencia:** rama `feat/rf03-request-y-no-nack`.
+
+## 2026-11-03 — Contrato completo y documentación de arquitectura
+
+- **Herramienta y modo:** Claude Code, Claude Opus 5.5, agéntico.
+- **Tarea:** cerrar RDOC03 y RDOC04: diagrama de componentes, OpenAPI que coincida con la API
+  real, schemas de los mensajes y milestones al día.
+- **Prompts relevantes:**
+  > "Quiero que hagas una revision punto por punto viendo que se cumple y que falta."
+
+  > "primero corrijamos todo lo necesario para que la entrega 1 este completa"
+- **Qué produjo la IA:**
+  - `scripts/exportar_openapi.py`, que genera `contratos/openapi/openapi.yaml` desde FastAPI. El
+    OpenAPI anterior describía campos que la API no devuelve.
+  - Los 12 JSON Schemas en `contratos/schemas/`.
+  - `docs/arquitectura.md` con el diagrama UML de componentes en Mermaid.
+  - La actualización de `milestones.md`.
+  - En el ADR-0001: el estado pasa a aceptado, la ruta `/interno/` se corrige a `/internal/` y se
+    agrega una nota sobre la topología heredada de la E0.
+- **Verificación:**
+  - El OpenAPI pasa `openapi-spec-validator`.
+  - Los schemas se validaron con `jsonschema` en 22 casos: los ejemplos del enunciado, los
+    mensajes que arman `connector` y `master`, y casos inválidos.
+  - También se validaron tres mensajes reales de producción.
+  - `ruff check` sin errores.
+- **Correcciones del integrante:** ninguna hasta ahora (pendiente de revisión en el PR).
+- **Referencia:** rama `docs/arquitectura-y-contrato` (backend) y rama
+  `docs/contrato-api-y-mensajes` (contratos).
