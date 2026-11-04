@@ -1,155 +1,120 @@
 #!/usr/bin/env python3
-"""Script interactivo para la Demo con el ayudante: Anomalía 1.
+"""Ensayo de la anomalía 1 de la demo: reenvío duplicado de un mensaje sensible.
 
-Demuestra en vivo:
-1. Reenvío duplicado de un mensaje sensible (mismo idpk).
-2. El ledger no cambia dos veces (idempotencia contable).
-3. El mensaje duplicado queda registrado en duplicate_messages / message-log (RF05).
+Simula a connector contra un master local y muestra que:
+1. Un demand-statement reenviado con el mismo idpk no cambia el ledger dos veces.
+2. El reenvío queda en el registro de duplicados (RF05, GET /message-log).
 
-Uso:
+Solo corre contra el stack local (`docker compose up`): inyecta un ciclo de prueba
+que mueve el presupuesto, y en producción eso alteraría el budgetBalance que se le
+reporta a la central. Además, Nginx bloquea /internal/ desde afuera.
+
+Basado en el script original de Vicente Pavez (PR #17), adaptado al contrato actual
+de /internal/messages. Uso:
+
     python3 scripts/demo_anomalia_1.py [--url http://127.0.0.1:8001]
 """
 
 import argparse
 import json
 import sys
-import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from urllib.parse import urlparse
+
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
-def make_request(url: str, method: str = "GET", data: dict | None = None) -> tuple[int, dict]:
-    """Realiza una petición HTTP usando solo la librería estándar de Python."""
-    req_data = json.dumps(data).encode("utf-8") if data else None
-    headers = {"Content-Type": "application/json"} if data else {}
-    req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
-
+def request(url: str, body: dict | None = None) -> tuple[int, dict]:
+    """GET o POST con JSON, solo con la librería estándar."""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    req = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode("utf-8")
-            return resp.status, json.loads(body) if body else {}
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8")
-        try:
-            parsed = json.loads(body)
-        except Exception:
-            parsed = {"error": body}
-        return e.code, parsed
+        with urllib.request.urlopen(req) as response:
+            return response.status, json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as error:
+        return error.code, {"error": error.read().decode("utf-8", errors="replace")}
 
 
-def print_step(title: str) -> None:
-    print(f"\n{'='*70}\n[DEMO ANOMALÍA 1] {title}\n{'='*70}")
+def central(message_type: str, cycle_id: str, data: dict, idpk: str | None = None) -> dict:
+    """Mensaje de la central en el envelope v2, con msgId siempre nuevo."""
+    return {
+        "idpk": idpk or str(uuid.uuid4()),
+        "msgId": str(uuid.uuid4()),
+        "type": message_type,
+        "timestamp": _now(),
+        "sender": "central",
+        "cycleId": cycle_id,
+        "data": data,
+    }
+
+
+def step(title: str) -> None:
+    print(f"\n{'=' * 70}\n[ANOMALÍA 1] {title}\n{'=' * 70}")
+
+
+def balances(base: str, cycle_id: str) -> tuple[Decimal, Decimal]:
+    status, detail = request(f"{base}/cycles/{cycle_id}")
+    if status != 200:
+        sys.exit(f"GET /cycles/{cycle_id} respondió {status}: {detail}")
+    return Decimal(str(detail["balances"]["budget"])), Decimal(str(detail["balances"]["energy"]))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Demo Anomalía 1: Reenvío duplicado de idpk")
-    parser.add_argument("--url", default="http://127.0.0.1:8001", help="URL base de la API")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--url", default="http://127.0.0.1:8001", help="URL de un master local")
+    base = parser.parse_args().url.rstrip("/")
+    if urlparse(base).hostname not in _LOCAL_HOSTS:
+        sys.exit("Este ensayo solo corre contra un master local: alteraría el presupuesto real.")
 
-    base_url = args.url.rstrip("/")
-    cycle_id = f"cycle-demo-{int(time.time())}"
-    shared_idpk = f"sensible-idpk-{uuid.uuid4().hex[:8]}"
+    cycle_id = f"cycle-demo-{uuid.uuid4().hex[:8]}"
+    messages = f"{base}/internal/messages"
+    valid_until = (datetime.now(UTC) + timedelta(minutes=20)).isoformat().replace("+00:00", "Z")
 
-    print_step(f"Iniciando ciclo de prueba en {base_url} (Ciclo: {cycle_id})")
+    step(f"Ciclo de prueba {cycle_id}")
+    energy = {"generationCapacity": 1000000, "consumption": 800000, "generationCost": 200}
+    status_statement = {"energy": energy, "validUntil": valid_until}
+    print(
+        "status-statement:",
+        request(messages, central("status-statement", cycle_id, status_statement)),
+    )
+    print(
+        "transfer:        ", request(messages, central("transfer", cycle_id, {"quantity": 500000}))
+    )
 
-    # 1. Crear ciclo base
-    stat_msg = {
-        "idpk": f"stat-{uuid.uuid4().hex[:8]}",
-        "msgId": str(uuid.uuid4()),
-        "type": "status-statement",
-        "cycleId": cycle_id,
-        "timestamp": datetime.now(UTC).isoformat(),
-        "data": {
-            "energy": {"generationCapacity": 1000000, "consumption": 800000, "generationCost": 200.0}
-        },
-    }
-    status, res = make_request(f"{base_url}/ledger/messages", "POST", stat_msg)
-    print(f"1. Status-statement enviado: HTTP {status} -> Capacidad: 1,000,000 kWh, Costo: 200")
+    demand = {"balance": {"quantity": 1000, "valuePerKwh": 200}}
+    idpk = str(uuid.uuid4())
 
-    # 2. Cargar fondos
-    transfer_msg = {
-        "idpk": f"trans-{uuid.uuid4().hex[:8]}",
-        "msgId": str(uuid.uuid4()),
-        "type": "transfer",
-        "cycleId": cycle_id,
-        "timestamp": datetime.now(UTC).isoformat(),
-        "data": {"quantity": 500000.0},
-    }
-    status, res = make_request(f"{base_url}/ledger/messages", "POST", transfer_msg)
-    print(f"2. Transfer recibido: HTTP {status} -> Presupuesto inicial: $500,000 créditos")
+    step(f"Envío original del demand-statement (idpk {idpk})")
+    print("respuesta:", request(messages, central("demand-statement", cycle_id, demand, idpk)))
+    before = balances(base, cycle_id)
+    print(f"presupuesto {before[0]} | energía {before[1]} kWh")
 
-    # 3. Enviar mensaje sensible por primera vez
-    print_step(f"PASO 1: Envío original del mensaje sensible con idpk='{shared_idpk}'")
-    first_demand = {
-        "idpk": shared_idpk,
-        "msgId": str(uuid.uuid4()),
-        "type": "demand-statement",
-        "cycleId": cycle_id,
-        "timestamp": datetime.now(UTC).isoformat(),
-        "data": {
-            "balance": {"quantity": 1000, "valuePerKwh": 200.0}  # +1000 kWh, -$200,000
-        },
-    }
-    status, res = make_request(f"{base_url}/ledger/messages", "POST", first_demand)
-    print(f"Respuesta HTTP: {status} (CREATED)")
-    print(f"isDuplicate:    {res.get('isDuplicate')}")
-    print(f"Delta energía:  {res.get('deltaEnergy'):+d} kWh")
-    print(f"Delta budget:   ${res.get('deltaBudget'):+,.2f} créditos")
-    print(f"Nuevo balance:  Presupuesto=${res.get('budgetBalance'):,.2f} | Energía={res.get('energyBalance')} kWh")
+    step("Reenvío con el MISMO idpk y un msgId nuevo")
+    status, answer = request(messages, central("demand-statement", cycle_id, demand, idpk))
+    print(f"respuesta: {status} {answer}  <- connector igual confirma y responde ACK")
+    after = balances(base, cycle_id)
+    print(f"presupuesto {after[0]} | energía {after[1]} kWh")
 
-    initial_budget = res.get("budgetBalance")
-    initial_energy = res.get("energyBalance")
+    if answer.get("outcome") != "duplicate" or after != before:
+        sys.exit("\n>>> FALLÓ: el reenvío cambió el ledger o no se detectó como duplicado.")
+    print("\n>>> El ledger no cambió dos veces.")
 
-    # 4. Reenvío duplicado intencional con el MISMO idpk
-    print_step(f"PASO 2: Provocando Anomalía -> Reenvío duplicado con el MISMO idpk='{shared_idpk}'")
-    retry_demand = {
-        "idpk": shared_idpk,  # MISMO IDPK
-        "msgId": str(uuid.uuid4()),  # msgId nuevo
-        "type": "demand-statement",
-        "cycleId": cycle_id,
-        "timestamp": datetime.now(UTC).isoformat(),
-        "data": {
-            "balance": {"quantity": 1000, "valuePerKwh": 200.0}
-        },
-    }
-    status, res = make_request(f"{base_url}/ledger/messages", "POST", retry_demand)
-    print(f"Respuesta HTTP: {status} (OK - Conector puede hacer ACK sin reintentar)")
-    print(f"isDuplicate:    {res.get('isDuplicate')} (¡COLISIÓN DETECTADA!)")
-    print(f"Delta energía:  {res.get('deltaEnergy')} kWh (0 mutaciones)")
-    print(f"Delta budget:   ${res.get('deltaBudget')} créditos (0 mutaciones)")
+    step("Registro de duplicados (GET /message-log?category=duplicate)")
+    _, log = request(f"{base}/message-log?category=duplicate&limit=50")
+    found = [item for item in log.get("items", []) if item.get("idpk") == idpk]
+    if not found:
+        sys.exit(">>> FALLÓ: el duplicado no aparece en /message-log.")
+    print(json.dumps(found[0], indent=2, ensure_ascii=False))
+    print("\n>>> El duplicado quedó registrado y es consultable (RF05).")
 
-    # 5. Comprobar que el ledger NO cambió
-    print_step("PASO 3: Verificando integridad del Ledger (GET /cycles/{cycleId})")
-    status, cycle_detail = make_request(f"{base_url}/cycles/{cycle_id}")
-    final_budget = cycle_detail.get("balances", {}).get("budget")
-    final_energy = cycle_detail.get("balances", {}).get("energy")
 
-    print(f"Presupuesto post-duplicado: ${final_budget:,.2f} (Esperado: ${initial_budget:,.2f})")
-    print(f"Energía post-duplicada:     {final_energy} kWh (Esperado: {initial_energy} kWh)")
-
-    if final_budget == initial_budget and final_energy == initial_energy:
-        print("\n>>> VERIFICACIÓN EXITOSA: Los balances del ledger NO sufrieron alteración doble. <<<")
-    else:
-        print("\n>>> ERROR: Los balances cambiaron tras el duplicado. <<<")
-        sys.exit(1)
-
-    # 6. Comprobar que el duplicado quedó en message-log (RF05)
-    print_step("PASO 4: Verificando registro en la tabla de duplicados (GET /message-log?category=duplicate)")
-    status, log_data = make_request(f"{base_url}/message-log?category=duplicate")
-    dups = [item for item in log_data.get("items", []) if item.get("idpk") == shared_idpk]
-
-    if dups:
-        print(f"Fila encontrada en duplicate_messages: {json.dumps(dups[0], indent=2)}")
-        print("\n>>> VERIFICACIÓN EXITOSA: El intento duplicado está registrado y es consultable para RF05. <<<")
-    else:
-        print("\n>>> ERROR: No se encontró el registro del duplicado en /message-log. <<<")
-        sys.exit(1)
-
-    print("\n" + "#"*70)
-    print("# DEMO ANOMALÍA 1 LISTA Y VERIFICADA AL 100% PARA EL AYUDANTE")
-    print("#"*70 + "\n")
+def _now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 if __name__ == "__main__":

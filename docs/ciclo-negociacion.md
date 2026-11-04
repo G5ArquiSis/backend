@@ -2,7 +2,7 @@
 
 Cómo `master` lleva el ledger, envía el `negotiation-report`, maneja las negociaciones
 voluntarias y registra lo que no se aplicó, y qué necesita de `connector` para que todo corra. Las decisiones están en los ADRs
-de [AD2](adr/0001-persistencia-ledger.md) y [AD3](adr/0003-timeouts-negociacion.md).
+de [AD2](adr/0002-persistencia-ledger.md) y [AD3](adr/0003-timeouts-negociacion.md).
 
 ## Reparto de responsabilidades
 
@@ -32,6 +32,7 @@ el reporte de un ciclo ni una negociación en curso.
 | `master` no responde o falla | Lo reencola | Nada: no se confirma lo que aún se puede perder |
 | El envelope es inválido, o `master` rechaza el contenido | Lo confirma | NACK, y queda en el registro |
 | No se puede parsear o no trae `msgId` | Lo confirma | Nada: no hay a quién responder; queda en el registro |
+| Es un `ack`, `nack` o `error` inválido | Lo confirma | Nada: no hay NACK de un ACK, de un NACK ni de un error; queda en el registro como descartado |
 
 Si se cae la conexión al broker, `connector` reintenta con espera creciente y sigue marcando su
 señal de vida: la API sigue sirviendo lo ya persistido, y los mensajes sin confirmar vuelven
@@ -125,6 +126,20 @@ los eventos. La energía es por ciclo.
 - Si el ledger cambia después de reportar y la ventana sigue abierta, se envía una corrección
   con un `idpk` nuevo.
 
+## Peticiones directas
+
+El enunciado pide solicitar el estado y las tablas de transmisión si no llegan al abrir la
+ventana. `master` lo hace con un `request` (sin `cycleId`, porque no está ligado a un ciclo):
+
+- Pide el `status-statement` cuando la central habló de un ciclo (por ejemplo, con su `transfer`)
+  y su estado no llegó dentro de 30 segundos. Si la central no nombró un ciclo, no se le debe
+  reporte y no se pide nada.
+- Lo vuelve a pedir cada 2 minutos, con un tope de 3 pedidos por ciclo: repetirlo no cambia la
+  respuesta y la política de abuso del broker castiga los loops.
+- Junto con cada pedido del estado, pide la `distance-table` si todavía no hay ninguna guardada.
+- El conteo de pedidos vive en la outbox (`dedupe_key` por intento): no hay columnas nuevas, y
+  las dos réplicas no repiten un mismo pedido.
+
 ## API para la interfaz
 
 Entran por `https://api.melchort.me`, con el token de Auth0. Por `https://melchort.me` responden
@@ -144,7 +159,11 @@ Entran por `https://api.melchort.me`, con el token de Auth0. Por `https://melcho
 
 Variables de `master`, documentadas en [`.env.example`](../.env.example): `CITY_CODE`,
 `REPORT_CLOSING_SECONDS`, `REPORT_MARGIN_SECONDS`, `NEGOTIATION_TIMEOUT_SECONDS`,
-`NEGOTIATION_MAX_ATTEMPTS` y `OUTBOX_REDELIVERY_SECONDS`. Todas tienen un valor por defecto.
+`NEGOTIATION_MAX_ATTEMPTS`, `OUTBOX_REDELIVERY_SECONDS`, `STATEMENT_REQUEST_GRACE_SECONDS`,
+`STATEMENT_REQUEST_INTERVAL_SECONDS` y `STATEMENT_REQUEST_MAX_ATTEMPTS`. Todas tienen un valor
+por defecto.
+
+`scripts/demo_anomalia_1.py` ensaya la anomalía 1 (duplicado) contra el stack local.
 
 ## Probarlo sin la central
 

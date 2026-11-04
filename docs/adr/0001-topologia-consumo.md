@@ -1,10 +1,14 @@
 # ADR-0001: Topología del Consumo de Mensajería
 
-- **Estado:** propuesto
+- **Estado:** aceptado
 - **Fecha:** 2026-10-07
 - **Responsable:** Catalina Berríos 
 - **Área del enunciado:** AD1 
 
+
+> **Nota (2026-11-03):** este ADR formaliza una topología que ya existía. La separación en
+> `connector` y `master` viene de la E0, portada en el commit `dab4622`, y el ADR se escribió
+> después de portarla. La alternativa 2 no se eligió en la E1: se ratificó.
 
 ## Contexto
 
@@ -37,7 +41,7 @@ Se decide mantener la separación en dos servicios/contenedores dentro de la mis
 
 1. **connector**: Proceso dedicado en Python ejecutando una conexión AMQP resiliente (usando `pika` con lógica de reconexión y exponential backoff). 
 
-Consume desde la cola `city.{CODE}` y publica respuestas (ACK/NACK) en el exchange central. Traslada los eventos válidos a `master` mediante llamadas HTTP POST internas (`http://master:8000/interno/...`).
+Consume desde la cola `city.{CODE}` y publica respuestas (ACK/NACK) en el exchange central. Traslada los eventos válidos a `master` mediante llamadas HTTP POST internas (`http://master:8000/internal/...`).
 
 2. **master**: Servicio FastAPI que atiende la API pública, administra la base de datos PostgreSQL y expone endpoints internos para que `connector` reporte eventos procesados, duplicados y descartes.
 
