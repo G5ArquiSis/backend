@@ -11,6 +11,7 @@
 | [arquitectura.md](arquitectura.md) — diagrama UML de componentes y cómo correr en local | RDOC03 | D |
 | [monitoreo.md](monitoreo.md) — New Relic: cómo está instalado y cómo replicarlo | RDOC03 | E |
 | [infraestructura.md](infraestructura.md) — runbook de AWS y deploy | RNF04 | E |
+| [gates-e2.md](gates-e2.md) — checklist de los gates G01 a G09 con su evidencia | Gates E2 | E |
 | [ciclo-negociacion.md](ciclo-negociacion.md) — ledger, reporte, negociaciones, API para la interfaz y contrato con `connector` | RF01 a RF05 | B, C |
 
 Los schemas de mensajes y el OpenAPI (RDOC04) viven en el repo

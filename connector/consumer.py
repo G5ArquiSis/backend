@@ -120,7 +120,7 @@ def consume_forever(
 
         if time.monotonic() - started >= _STABLE_SECONDS:
             delay = settings.reconnect_initial_delay_seconds
-        record_heartbeat()
+        record_heartbeat(name)
         logger.info("[%s] reintentando en %.0f s", name, delay)
         time.sleep(delay)
         delay = min(delay * 2, settings.reconnect_max_delay_seconds)
@@ -147,7 +147,7 @@ def serve_city_queue(channel: BlockingChannel, master: MasterClient, settings: S
         if method is not None:
             handle_city_delivery(channel, method.delivery_tag, body, master, settings)
 
-        record_heartbeat()
+        record_heartbeat("ciudad")
         now = time.monotonic()
         if now - last_poll >= settings.outbox_poll_seconds:
             last_poll = now
@@ -301,7 +301,7 @@ def serve_observer_queue(
     ):
         if method is not None:
             handle_observer_delivery(channel, method.delivery_tag, body, master)
-        record_heartbeat()
+        record_heartbeat("observer")
 
 
 def handle_observer_delivery(
