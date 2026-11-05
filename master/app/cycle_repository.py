@@ -25,8 +25,9 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.handler_registry import HANDLERS as _HANDLERS, register_handler
 from app.config import Settings
+from app.handler_registry import HANDLERS as _HANDLERS
+from app.handler_registry import register_handler
 from app.ledger import (
     GIVE,
     TAKE,

@@ -3,7 +3,7 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -45,7 +45,7 @@ def retry_after(value: str | None, fallback: float) -> float:
         return max(0.0, float(value))
     except ValueError:
         try:
-            return max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+            return max(0.0, (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds())
         except (TypeError, ValueError, OverflowError):
             return fallback
 
@@ -56,7 +56,7 @@ class WalletClient:
 
     Para escribir en la wallet, se necesita un Idempotency-Key (idpk) único por operación.
     La misma clave se conserva en cada reintento
-    El resultado final de la transaccion llega despues como un evento a la cola city.code (ambas o solo una).
+    El resultado final de la transaccion llega despues como un evento a la cola city.code
     """
 
     def __init__(self, base_url: str, api_key: str, *, transport=None,
@@ -137,53 +137,61 @@ class WalletClient:
                            memo: str, idempotency_key: str):
 
         # give es un dict con asset (el activo es la energía) y amount (cantidad de kwh que ofrece)
-        # take es un dict con asset (el activo es el credito) y amount (lo que cuesta en total aceptar el swap).
+        # take es un dict con asset (el activo es el credito) y amount (lo que cuesta en total
+        # aceptar el swap).
         # Ejemplo: give = {"asset": "kwh", "amount": 10}, take = {"asset": "credits", "amount": 100}
         # lo que se retiene es el Give (kwh) de la cuenta del proponente
 
         json_propose = {'give': give, 'take': take,
                         'expiresAt': expires_at, 'memo': memo}
 
-        return await self._request('POST', 'swaps', idempotency_key=idempotency_key, json=json_propose)
+        return await self._request('POST', 'swaps', idempotency_key=idempotency_key,
+                                   json=json_propose)
 
     async def accept_swap(self, swap_id: str, idempotency_key: str):
 
         # se aplica cuando el swap propuesto es aceptado por alguna ciudad.
         # se retiene el take (creditos) de la cuenta del comprador.
 
-        return await self._request('POST', f'swaps/{swap_id}/accept', idempotency_key=idempotency_key)
+        return await self._request('POST', f'swaps/{swap_id}/accept',
+                                   idempotency_key=idempotency_key)
 
     async def cancel_swap(self, swap_id: str, idempotency_key: str):
 
         # cancela una propuesta no aceptada por nadie.
         # se libera la retención del give (kwh) de la cuenta del proponente.
 
-        return await self._request('POST', f'swaps/{swap_id}/cancel', idempotency_key=idempotency_key)
+        return await self._request('POST', f'swaps/{swap_id}/cancel',
+                                   idempotency_key=idempotency_key)
 
     # lecturas de la wallet (no requieren idempotency key, no retienen nada, no generan eventos):
 
     async def get_swap_id(self, swap_id: str):
 
-        # se muestra el estado del swap: accepted, proposed, settled, cancelled, expired, rejected, y el último evento.
+        # se muestra el estado del swap: accepted, proposed, settled, cancelled,
+        # expired, rejected, y el último evento.
 
-        # muestra en lastEvent.data.balancesAfter los saldos propios de quien lee (quien tiene el swapId),
-        # en el instante de la lectura, nunca los de otra ciudad.
+        # muestra en lastEvent.data.balancesAfter los saldos propios de quien lee
+        # (quien tiene el swapId), en el instante de la lectura, nunca los de otra ciudad.
 
         return await self._request('GET', f'swaps/{swap_id}')
 
     async def get_balance(self):
 
-        # entrega el json con los saldos de kwh y creditos de la ciudad que hace la lectura, en el instante de la lectura.
+        # entrega el json con los saldos de kwh y creditos de la ciudad que hace la lectura,
+        # en el instante de la lectura.
 
         return await self._request('GET', 'balance')
 
     async def get_statement(self, *, cycle_id=None, asset=None, cursor=None, limit=None):
 
-        # es para consultar los movimientos de la wallet de la ciudad que hace la lectura, en el instante de la lectura.
+        # es para consultar los movimientos de la wallet de la ciudad que hace la lectura,
+        # en el instante de la lectura.
 
         params = {'cycleId': cycle_id, 'asset': asset,
                   'cursor': cursor, 'limit': limit}
-        return await self._request('GET', 'statement', params={k: v for k, v in params.items() if v is not None})
+        return await self._request('GET', 'statement', params={k: v for k, v in params.items()
+                                                               if v is not None})
 
     async def get_leaderboard(self):
 
