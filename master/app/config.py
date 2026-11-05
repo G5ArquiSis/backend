@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     statement_request_interval_seconds: int = 120
     statement_request_max_attempts: int = 3
 
+    # Flags de la E2. Cada merge a main despliega solo a producción: el código nuevo
+    # del mercado y de la wallet entra apagado y se enciende en el .env de la EC2
+    # cuando está probado, sin tocar el ciclo de la E1 que ya funciona.
+    market_enabled: bool = False
+    wallet_enabled: bool = False
+
     # El .env es compartido por los tres containers, así que las variables del
     # broker llegan acá aunque master no las use.
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

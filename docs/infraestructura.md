@@ -250,7 +250,9 @@ curl -i https://api.melchort.me/history -H "Authorization: Bearer <token>"   # 2
 | Ver logs | `sudo docker compose ... logs -f master-1 master-2` (o `connector`) en `/opt/energyshark` |
 | Agregar una variable de entorno | Documentarla en `.env.example` (PR) y agregarla a mano en `/opt/energyshark/.env` **antes** del merge |
 | Cambiar la config de Nginx | Editar `deploy/nginx/energyshark-tls.conf` (PR); el deploy la instala |
-| Agregar un endpoint | Nada en el gateway: las rutas `/{proxy+}` lo cubren |
+| Agregar un endpoint | En el gateway, nada: las rutas `/{proxy+}` lo cubren. En Nginx, su prefijo **debe** estar en el regex de rutas protegidas de `energyshark-tls.conf`; si no, queda público sin JWT. Prefijos ya reservados: `negotiations`, `cycles`, `connectivity`, `message-log`, `market`, `strategy`, `experiments`, `balance`, `leaderboard`. Avisar a E (infraestructura) antes del merge |
+| Cambiar una tabla existente | Migración SQL en `master/app/migrations/sql/` (ver su `README.md`). `create_all` solo crea tablas nuevas |
+| Encender el mercado o la wallet (E2) | `MARKET_ENABLED=true` / `WALLET_ENABLED=true` en `/opt/energyshark/.env` y `up -d`. Entran apagados para que un merge a `main` no cambie el ciclo en producción |
 | Permitir un origen nuevo en CORS | `aws apigatewayv2 update-api --cors-configuration ...` y actualizar `deploy/api-gateway/crear.sh` (PR) |
 
 ## Pendiente
