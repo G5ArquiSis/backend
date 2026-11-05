@@ -275,19 +275,33 @@ sudo docker compose --env-file .env --env-file release.env -f docker-compose.pro
   logs --tail 100 master-1 connector
 ```
 
-## Memoria (t3.micro, ~900 MB + 1 GB de swap)
+## Memoria (t3.micro, ~950 MB + 1 GB de swap)
 
-| Proceso | Límite | Por qué |
-|---|---|---|
-| `postgres` | 256 MB | Base pequeña; `shared_buffers` por defecto (128 MB) |
-| `master-1`, `master-2` | 256 MB c/u | FastAPI + agente de New Relic + pool de asyncpg |
-| `connector` | 128 MB | Hasta tres conexiones pika (observer, ciudad, mercado) en hilos |
-| Host | ~250 MB | Docker, Nginx, agente SSM, agente de infraestructura de New Relic |
+Medido en New Relic (`ContainerSample` y `SystemSample`) del 2026-10-29 al 2026-11-05, con la E1
+en producción:
 
-Los límites suman 896 MB y son topes, no reservas: la suma del uso real queda por debajo de la RAM,
-y el swap (`deploy/ec2-setup.sh`) absorbe picos. Un contenedor que pasa su límite lo mata el OOM
-killer y `restart: always` lo levanta; eso se ve en New Relic como reinicio. Si pasa seguido,
-subir el límite de ese servicio y bajar otro, nunca sumar más que la RAM.
+| Proceso | Límite | Uso promedio | Máximo | Por qué ese límite |
+|---|---|---|---|---|
+| `postgres` | 256 MB | 8 MB | 81 MB | Base pequeña; `shared_buffers` por defecto (128 MB) |
+| `master-1`, `master-2` | 256 MB c/u | 65 MB | 74 MB | FastAPI + agente de New Relic + pool de asyncpg |
+| `connector` | 128 MB | 20 MB | 57 MB | Hasta tres conexiones pika (observer, ciudad, mercado) en hilos |
+| Host completo | ~950 MB | 651 MB | 750 MB | Contenedores + Docker, Nginx, SSM, agente de New Relic y servicios de Ubuntu |
+| Swap | 1 GB | ~450 MB | 514 MB | Estable, sin crecer: páginas inactivas del host, no paginación activa |
+
+Lectura: los contenedores usan menos de un tercio de su límite y no tuvieron reinicios. La
+presión viene del host: unos 450 MB son procesos fuera de Docker (incluidos servicios de Ubuntu
+que la EC2 no usa, como `fwupd`, `packagekit`, `ModemManager` y `udisks2`). Hay margen para lo que
+agrega la E2 (consumidor del mercado y llamadas a la wallet) sin tocar los límites.
+
+Los límites suman 896 MB y son topes, no reservas. Un contenedor que pasa su límite lo mata el OOM
+killer y `restart: always` lo levanta; eso se ve en New Relic como reinicio (`restartCount` en
+`ContainerSample`). Si pasa seguido, subir el límite de ese servicio y bajar otro, nunca sumar más
+que la RAM. Consulta para repetir la medición:
+
+```sql
+SELECT average(memoryUsageBytes)/1e6, max(memoryUsageBytes)/1e6, latest(restartCount)
+FROM ContainerSample FACET name SINCE 7 days ago
+```
 
 ## Operación
 
