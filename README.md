@@ -30,13 +30,19 @@ curl -i http://127.0.0.1:8001/health      # master-1 (master-2 en 8002)
 curl -i 'http://127.0.0.1:8001/history?page=1&limit=25'
 ```
 
+Para trabajar sin la central ni la wallet reales (broker y wallet locales, con fallas
+inyectables): `docker compose --profile fake up --build`, después de agregar
+`scripts/fake_wallet/env.fake` al final de `.env`. Detalles en
+[`scripts/fake_wallet/README.md`](scripts/fake_wallet/README.md).
+
 ## Tests y lint
 
 Usar Python 3.12 (asyncpg no compila en 3.14).
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r master/requirements.txt -r connector/requirements.txt pytest pytest-asyncio httpx ruff
+pip install -r master/requirements.txt -r connector/requirements.txt \
+  -r scripts/fake_wallet/requirements.txt pytest pytest-asyncio httpx ruff
 pytest                      # los tests de integración se saltan si no hay Postgres
 TEST_DATABASE_URL=postgresql+asyncpg://energyshark:changeme@localhost:5432/energyshark_test pytest
 ruff check .

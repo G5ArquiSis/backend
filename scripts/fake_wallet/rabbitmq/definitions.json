@@ -1,0 +1,150 @@
+{
+  "users": [
+    {
+      "name": "admin",
+      "password_hash": "qDMQKKLapqq/V56nUia4CubYvBs0I//CzVPE+kk2t5Cc5NoD",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": [
+        "administrator"
+      ]
+    },
+    {
+      "name": "central",
+      "password_hash": "eem6Q5xKNMEjUxv1vT0ikdHigEnxiiLMqLOj6jAa/SMST0K0",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": []
+    },
+    {
+      "name": "city.TAL",
+      "password_hash": "V/u3qQ8TI9xdsTEX6zV4h6LOoZ8JBRehNmgAygsW51KcSCZC",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": []
+    },
+    {
+      "name": "observer",
+      "password_hash": "ATVen3aZ/b5NCgN5DHbjAYXfiA6XRnSwAUO7X14AbSmjEbcj",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": []
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "energy"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "admin",
+      "vhost": "energy",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    },
+    {
+      "user": "central",
+      "vhost": "energy",
+      "configure": "^$",
+      "write": ".*",
+      "read": "^central\\.q$"
+    },
+    {
+      "user": "city.TAL",
+      "vhost": "energy",
+      "configure": "^$",
+      "write": "^(energy\\.x|market)$",
+      "read": "^(city\\.TAL\\.q|market\\.TAL)$"
+    },
+    {
+      "user": "observer",
+      "vhost": "energy",
+      "configure": "^$",
+      "write": "^$",
+      "read": "^observer\\.local\\.q$"
+    }
+  ],
+  "topic_permissions": [
+    {
+      "user": "city.TAL",
+      "vhost": "energy",
+      "exchange": "market",
+      "write": "^market\\.offer\\.TAL$",
+      "read": ".*"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "energy.x",
+      "vhost": "energy",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "market",
+      "vhost": "energy",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "city.TAL.q",
+      "vhost": "energy",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "market.TAL",
+      "vhost": "energy",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "central.q",
+      "vhost": "energy",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "observer.local.q",
+      "vhost": "energy",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "energy.x",
+      "vhost": "energy",
+      "destination": "city.TAL.q",
+      "destination_type": "queue",
+      "routing_key": "city.TAL",
+      "arguments": {}
+    },
+    {
+      "source": "energy.x",
+      "vhost": "energy",
+      "destination": "central.q",
+      "destination_type": "queue",
+      "routing_key": "central",
+      "arguments": {}
+    },
+    {
+      "source": "market",
+      "vhost": "energy",
+      "destination": "market.TAL",
+      "destination_type": "queue",
+      "routing_key": "market.offer.*",
+      "arguments": {}
+    }
+  ]
+}

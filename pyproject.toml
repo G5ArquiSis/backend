@@ -12,8 +12,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["master/tests", "connector/tests", "tests"]
-pythonpath = ["master", "connector"]
+testpaths = ["master/tests", "connector/tests", "tests", "scripts/fake_wallet/tests"]
+pythonpath = ["master", "connector", "scripts/fake_wallet"]
 # database.py construye el engine al importarse y su pool de asyncpg queda atado
 # al primer event loop que lo toca. Sin un loop compartido, el segundo test que
 # use la base falla con "Event loop is closed".
@@ -23,4 +23,6 @@ markers = ["integration: necesita un Postgres vivo (se salta si no hay)"]
 
 [tool.ruff.lint.isort]
 # Los módulos de connector viven en la raíz de su imagen, sin paquete contenedor.
-known-first-party = ["app", "config", "consumer", "events", "heartbeat", "master_client"]
+known-first-party = [
+  "app", "config", "consumer", "events", "heartbeat", "master_client", "fake_wallet",
+]

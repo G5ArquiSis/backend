@@ -42,7 +42,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r master/requirements.txt -r connector/requirements.txt pytest pytest-asyncio httpx ruff
+      - run: pip install -r master/requirements.txt -r connector/requirements.txt -r scripts/fake_wallet/requirements.txt pytest pytest-asyncio httpx ruff
       - run: ruff check .
       - run: pytest
       # La imagen de master arranca bajo el agente de New Relic: se prueba acá, con una key
