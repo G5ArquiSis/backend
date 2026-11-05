@@ -26,6 +26,8 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.handler_registry import HANDLERS as _HANDLERS
+from app.handler_registry import register_handler
 from app.ledger import (
     GIVE,
     TAKE,
@@ -103,7 +105,8 @@ async def apply_central_message(
         outcome = await handler(session, message, now, settings)
     except (KeyError, TypeError, InvalidOperation, ValueError) as error:
         await session.rollback()
-        raise MalformedMessageError(f"{message.get('type')}: {error!r}") from error
+        raise MalformedMessageError(
+            f"{message.get('type')}: {error!r}") from error
 
     if outcome == APPLIED:
         await session.commit()
@@ -219,7 +222,8 @@ async def _apply_confirmation(
             .where(Negotiation.id == negotiation.id, Negotiation.state.in_(_AWAITING_CONFIRMATION))
             .values(
                 state=CONFIRMED,
-                deadline_at=now + timedelta(seconds=settings.negotiation_timeout_seconds),
+                deadline_at=now +
+                timedelta(seconds=settings.negotiation_timeout_seconds),
                 **confirmation,
             )
         )
@@ -281,7 +285,8 @@ async def _apply_give_payment(session: AsyncSession, message: dict, because_of: 
     if paid.rowcount != 1:
         return DUPLICATE
 
-    energy_delta, budget_delta = negotiation_deltas(GIVE, negotiation.confirmed_energy, amount)
+    energy_delta, budget_delta = negotiation_deltas(
+        GIVE, negotiation.confirmed_energy, amount)
     recorded = await _record_event(
         session,
         message,
@@ -340,12 +345,13 @@ async def _apply_rejection(
         values = {"report_error": reason}
 
     reported = await session.execute(
-        update(CycleLedger).where(CycleLedger.report_msg_id == target).values(**values)
+        update(CycleLedger).where(
+            CycleLedger.report_msg_id == target).values(**values)
     )
     return APPLIED if reported.rowcount == 1 else IGNORED
 
 
-_HANDLERS = {
+for _message_type, _handler in {
     "status-statement": _apply_status_statement,
     "transfer": _apply_transfer,
     "demand-statement": _apply_demand_statement,
@@ -354,7 +360,8 @@ _HANDLERS = {
     "error": _apply_rejection,
     "nack": _apply_rejection,
     "distance-table": _apply_distance_table,
-}
+}.items():
+    register_handler(_message_type, _handler)
 
 
 # --- Trabajo con plazo: reporte, correcciones y timeouts ---------------------------------
@@ -417,7 +424,8 @@ async def _enqueue_report(
         "negotiation-report",
         idpk,
         cycle.cycle_id,
-        {"budgetBalance": _number(budget), "energyBalance": _number(cycle.energy_balance)},
+        {"budgetBalance": _number(budget), "energyBalance": _number(
+            cycle.energy_balance)},
         now,
         settings,
     )
@@ -452,7 +460,8 @@ async def _retry_or_expire_negotiations(
         # enunciado pide asumir que no hubo operación y reintentarla.
         negotiation.attempts += 1
         negotiation.state = PENDING
-        negotiation.deadline_at = now + timedelta(seconds=settings.negotiation_timeout_seconds)
+        negotiation.deadline_at = now + \
+            timedelta(seconds=settings.negotiation_timeout_seconds)
         envelope = _proposal_envelope(negotiation, now, settings)
         negotiation.msg_ids = [*negotiation.msg_ids, envelope["msgId"]]
         await _enqueue(session, f"proposal:{negotiation.id}:{negotiation.attempts}", envelope)
@@ -491,13 +500,15 @@ async def _request_missing_statements(
             .select_from(OutboxMessage)
             .where(OutboxMessage.dedupe_key.startswith(prefix))
         )
-        due = min(int((now - cycle.created_at - grace) / interval) + 1, max_attempts)
+        due = min(int((now - cycle.created_at - grace) /
+                  interval) + 1, max_attempts)
         if sent >= due:
             continue
 
         attempt = sent + 1
         await _enqueue(
-            session, f"{prefix}{attempt}", _request_envelope("status-statement", now, settings)
+            session, f"{prefix}{attempt}", _request_envelope(
+                "status-statement", now, settings)
         )
         if await current_distance_table(session) is None:
             await _enqueue(
@@ -524,7 +535,8 @@ async def claim_outbox(
         select(OutboxMessage)
         .where(
             OutboxMessage.sent_at.is_(None),
-            (OutboxMessage.claimed_at.is_(None)) | (OutboxMessage.claimed_at <= stale_before),
+            (OutboxMessage.claimed_at.is_(None)) | (
+                OutboxMessage.claimed_at <= stale_before),
         )
         .order_by(OutboxMessage.id)
         .limit(_OUTBOX_BATCH)
@@ -540,7 +552,8 @@ async def claim_outbox(
 async def mark_outbox_sent(session: AsyncSession, message_id: int, now: datetime) -> bool:
     """Registra que connector publicó el mensaje. Devuelve False si no existe."""
     marked = await session.execute(
-        update(OutboxMessage).where(OutboxMessage.id == message_id).values(sent_at=now)
+        update(OutboxMessage).where(
+            OutboxMessage.id == message_id).values(sent_at=now)
     )
     await session.commit()
     return marked.rowcount == 1
@@ -593,7 +606,8 @@ async def create_negotiation(
                 Negotiation.state.in_(_LIVE),
             )
         )
-        sellable = sellable_energy(cycle.generation_capacity, cycle.consumption)
+        sellable = sellable_energy(
+            cycle.generation_capacity, cycle.consumption)
         spare = sellable - committed.scalar_one()
         if quantity > spare:
             raise NegotiationNotAllowedError(
@@ -609,7 +623,8 @@ async def create_negotiation(
         state=PENDING,
         attempts=1,
         msg_ids=[],
-        deadline_at=now + timedelta(seconds=settings.negotiation_timeout_seconds),
+        deadline_at=now +
+        timedelta(seconds=settings.negotiation_timeout_seconds),
     )
     session.add(negotiation)
     await session.flush()
@@ -632,7 +647,8 @@ async def list_negotiations(
 ) -> Sequence[Negotiation]:
     """Historial de negociaciones, de la más reciente a la más antigua, siempre acotado."""
     found = await session.execute(
-        select(Negotiation).order_by(Negotiation.id.desc()).limit(limit).offset(offset)
+        select(Negotiation).order_by(
+            Negotiation.id.desc()).limit(limit).offset(offset)
     )
     return found.scalars().all()
 
@@ -655,14 +671,16 @@ async def get_cycle(session: AsyncSession, cycle_id: str) -> CycleLedger | None:
 async def list_cycle_events(session: AsyncSession, cycle_id: str) -> Sequence[LedgerEvent]:
     """Operaciones aplicadas en el ciclo, en el orden en que se aplicaron."""
     found = await session.execute(
-        select(LedgerEvent).where(LedgerEvent.cycle_id == cycle_id).order_by(LedgerEvent.id)
+        select(LedgerEvent).where(LedgerEvent.cycle_id ==
+                                  cycle_id).order_by(LedgerEvent.id)
     )
     return found.scalars().all()
 
 
 async def list_cycle_negotiations(session: AsyncSession, cycle_id: str) -> Sequence[Negotiation]:
     found = await session.execute(
-        select(Negotiation).where(Negotiation.cycle_id == cycle_id).order_by(Negotiation.id)
+        select(Negotiation).where(Negotiation.cycle_id ==
+                                  cycle_id).order_by(Negotiation.id)
     )
     return found.scalars().all()
 
@@ -728,7 +746,8 @@ async def list_message_log(
     statement = select(MessageLog)
     if category is not None:
         statement = statement.where(MessageLog.category == category)
-    statement = statement.order_by(MessageLog.id.desc()).limit(limit).offset(offset)
+    statement = statement.order_by(
+        MessageLog.id.desc()).limit(limit).offset(offset)
 
     return (await session.execute(statement)).scalars().all()
 
