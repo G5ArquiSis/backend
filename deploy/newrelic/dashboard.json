@@ -1,0 +1,496 @@
+{
+  "name": "EnergyShark E2: mercado, wallet y ciclos",
+  "description": "RNF05 de la E2. Fuente: deploy/newrelic/dashboard.json del repo backend (docs/monitoreo.md).",
+  "permissions": "PUBLIC_READ_WRITE",
+  "pages": [
+    {
+      "name": "Ciclos",
+      "description": "G03: cada ciclo con o sin negotiation-report",
+      "widgets": [
+        {
+          "title": "Ciclos cerrados (24 h)",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 4,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.billboard"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT filter(count(*), WHERE owedReport IS TRUE AND reportSent IS TRUE) AS 'Con reporte', filter(count(*), WHERE owedReport IS TRUE AND reportSent IS FALSE) AS 'Sin reporte', filter(count(*), WHERE owedReport IS FALSE) AS 'Sin status-statement' FROM CycleClosed SINCE 1 day ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Cierres por ciclo",
+          "layout": {
+            "column": 5,
+            "row": 1,
+            "width": 8,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.stacked_bar"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT count(*) FROM CycleClosed FACET CASES (WHERE owedReport IS TRUE AND reportSent IS TRUE AS 'Con reporte', WHERE owedReport IS TRUE AND reportSent IS FALSE AS 'Sin reporte', WHERE owedReport IS FALSE AS 'Sin status-statement') TIMESERIES 20 minutes SINCE 1 day ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Atraso del reporte respecto de su plazo (s)",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT average(reportDelaySeconds) AS 'Promedio', max(reportDelaySeconds) AS 'Máximo' FROM CycleClosed WHERE reportSent IS TRUE TIMESERIES 1 hour SINCE 1 day ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Últimos ciclos",
+          "layout": {
+            "column": 7,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.table"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT cycleId, owedReport, reportSent, reportError, reportDelaySeconds, energyBalance FROM CycleClosed SINCE 1 day ago LIMIT 50"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Mercado",
+      "description": "Feed market.{CODE} y eventos de la wallet que llegan por city.{CODE}",
+      "widgets": [
+        {
+          "title": "Mensajes del feed por tipo",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT count(*) FROM InboundMessage WHERE feed = 'market' FACET type TIMESERIES SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Ofertas por ciudad (3 h)",
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.bar"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT count(*) FROM InboundMessage WHERE feed = 'market' FACET sender SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Atraso del feed: emisor → master (ms)",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT percentile(lagMs, 50, 95, 99) FROM InboundMessage WHERE feed = 'market' TIMESERIES SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Resultado por feed (3 h)",
+          "layout": {
+            "column": 7,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.table"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT count(*) FROM InboundMessage FACET feed, outcome SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Eventos de la wallet recibidos",
+          "layout": {
+            "column": 1,
+            "row": 7,
+            "width": 12,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT count(*) FROM InboundMessage WHERE feed = 'wallet' FACET type TIMESERIES SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Wallet",
+      "description": "Llamadas HTTP del WalletClient (cada intento, reintentos incluidos)",
+      "widgets": [
+        {
+          "title": "Llamadas por endpoint y resultado",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.area"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT count(*) FROM WalletCall FACET endpoint, outcome TIMESERIES SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Latencia p50/p95/p99 (ms)",
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT percentile(durationMs, 50, 95, 99) FROM WalletCall TIMESERIES SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Intentos fallidos (%)",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT percentage(count(*), WHERE outcome != 'ok') AS 'Fallidos' FROM WalletCall TIMESERIES SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Status HTTP (3 h)",
+          "layout": {
+            "column": 7,
+            "row": 4,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.table"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT count(*) FROM WalletCall FACET status, endpoint SINCE 3 hours ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Infraestructura",
+      "description": "Contenedores en la EC2",
+      "widgets": [
+        {
+          "title": "Memoria por contenedor (MB)",
+          "layout": {
+            "column": 1,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT average(memoryUsageBytes)/1e6 FROM ContainerSample FACET name TIMESERIES SINCE 1 day ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Reinicios y límite de memoria",
+          "layout": {
+            "column": 7,
+            "row": 1,
+            "width": 6,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.table"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT latest(restartCount) AS 'Reinicios', max(memoryUsageBytes)/1e6 AS 'Máx MB', latest(memorySizeLimitBytes)/1e6 AS 'Límite MB' FROM ContainerSample FACET name SINCE 1 day ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        },
+        {
+          "title": "Host: memoria y swap (MB)",
+          "layout": {
+            "column": 1,
+            "row": 4,
+            "width": 12,
+            "height": 3
+          },
+          "linkedEntityGuids": null,
+          "visualization": {
+            "id": "viz.line"
+          },
+          "rawConfiguration": {
+            "nrqlQueries": [
+              {
+                "accountIds": [
+                  8591548
+                ],
+                "query": "SELECT average(memoryUsedBytes)/1e6 AS 'Usada', average(swapUsedBytes)/1e6 AS 'Swap' FROM SystemSample TIMESERIES SINCE 1 day ago"
+              }
+            ],
+            "facet": {
+              "showOtherSeries": false
+            },
+            "platformOptions": {
+              "ignoreTimeRange": false
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variables": []
+}

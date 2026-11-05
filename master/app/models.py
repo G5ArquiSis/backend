@@ -100,6 +100,11 @@ class CycleLedger(Base):
     reported_budget: Mapped[Decimal | None] = mapped_column(_Amount, nullable=True)
     reported_energy: Mapped[Decimal | None] = mapped_column(_Energy, nullable=True)
     report_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Cuándo se informó a New Relic el cierre del ciclo (evento CycleClosed, app/metrics.py).
+    # Lo agrega la migración 0001 en bases que ya existían.
+    closure_recorded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

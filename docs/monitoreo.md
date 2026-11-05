@@ -76,3 +76,28 @@ sudo docker logs energyshark-e1-master-1-1 2>&1 | grep -i "new relic" | tail -3
 
 En el log del agente de infraestructura aparece el error `failed to load log configs` del
 `log-forwarder`. Es esperado: no se configuró el reenvío de logs, que no se necesita.
+
+## Métricas de la E2 (RNF05): mercado, wallet y ciclos
+
+master registra tres eventos propios (`master/app/metrics.py`). Sin agente, no hace nada.
+
+| Evento | Cuándo |
+|---|---|
+| `WalletCall` | Cada intento HTTP del `WalletClient`, reintentos incluidos. Es el hook por defecto del cliente |
+| `InboundMessage` | Cada mensaje que connector entrega a master. `feed` vale `market`, `wallet` o `cycle`, y `lagMs` es el atraso desde el emisor |
+| `CycleClosed` | Una vez por ciclo, al vencer su ventana: `owedReport`, `reportSent`, `reportError` |
+
+**Dashboard:** *Dashboards → Import dashboard* con el contenido de
+[`deploy/newrelic/dashboard.json`](../deploy/newrelic/dashboard.json). Trae cuatro páginas:
+Ciclos, Mercado, Wallet e Infraestructura.
+
+**Alertas** (*Alerts → Alert conditions → New NRQL condition*). Se crean **después** del deploy
+que trae estos eventos, porque sin datos las de pérdida de señal se disparan:
+
+| Alerta | NRQL | Umbral |
+|---|---|---|
+| Ciclo sin reporte (G03) | `SELECT count(*) FROM CycleClosed WHERE owedReport IS TRUE AND reportSent IS FALSE` | > 0 al menos una vez en 5 min |
+| Reloj detenido (guardián del ciclo) | `SELECT count(*) FROM CycleClosed` | Pérdida de señal tras 45 min (dos ciclos) |
+| Feed del mercado detenido | `SELECT count(*) FROM InboundMessage WHERE feed = 'market'` | Pérdida de señal tras 10 min. Activarla sólo con `MARKET_ENABLED=true` |
+| Wallet fallando | `SELECT percentage(count(*), WHERE outcome != 'ok') FROM WalletCall` | > 20 % durante 5 min |
+| Wallet lenta | `SELECT percentile(durationMs, 95) FROM WalletCall` | > 5000 ms durante 5 min |

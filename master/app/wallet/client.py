@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from app import metrics
+
 
 class WalletError(Exception):
     def __init__(self, status_code: int, payload: Any):
@@ -76,7 +78,8 @@ class WalletClient:
         # maximo de 300 lecturas por minuto en la wallet
         self._reads = RateLimiter(300)
         self.max_attempts = max(1, max_attempts)
-        self.hook = hook
+        # Por defecto cada intento queda en New Relic como evento WalletCall (RNF05).
+        self.hook = hook if hook is not None else metrics.wallet_call_hook
 
     async def aclose(self):
         await self._client.aclose()

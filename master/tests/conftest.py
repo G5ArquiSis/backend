@@ -21,8 +21,9 @@ from fastapi import FastAPI  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from app.database import _session_factory, create_schema  # noqa: E402
+from app.database import _session_factory, create_schema, engine  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
+from app.migrations import run_migrations  # noqa: E402
 
 
 @pytest.fixture
@@ -51,7 +52,10 @@ async def database() -> None:
     quien corrija la entrega va a ejecutar `pytest` sin levantar nada.
     """
     try:
+        # Igual que el lifespan de producción: tablas nuevas y después las migraciones, para
+        # que una base de tests de antes de una migración quede con el esquema actual.
         await create_schema()
+        await run_migrations(engine)
     except Exception as error:  # noqa: BLE001 - cualquier fallo de conexión sirve para saltar
         pytest.skip(f"sin Postgres alcanzable: {error}")
 
