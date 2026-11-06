@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     """Valores que el servicio web necesita del entorno."""
 
     database_url: str
+    wallet_base_url: str | None = None
+    wallet_api_key: str | None = None
 
     # Código de la ciudad: va como cityId en todo mensaje que emitimos.
     city_code: str = "TAL"

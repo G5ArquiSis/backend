@@ -35,7 +35,6 @@ from app.ledger import (
     negotiation_deltas,
     price_cap,
     sellable_energy,
-    status_statement_energy,
     total_amount,
 )
 from app.models import (
@@ -45,6 +44,7 @@ from app.models import (
     MessageLog,
     Negotiation,
     OutboxMessage,
+    WalletBalance,  # para consultar los saldos oficiales que tiene la wallet
 )
 
 PENDING = "pending"
@@ -131,8 +131,22 @@ async def _apply_status_statement(
     generation = _decimal(energy["generationCapacity"])
     consumption = _decimal(energy["consumption"])
     valid_until = _datetime(message["data"]["validUntil"])
-    report_due_at = valid_until - timedelta(
-        seconds=settings.report_closing_seconds - settings.report_margin_seconds
+
+    market = message["data"].get("market", {})
+
+    # para esta entrega la central informa cuándo comienza el periodo para enviar el
+    # negotiation-report
+    # la hora en que comienza el periodo de cierre (donde se debe enviar el reporte)
+    # viene en reportOpensAt,
+    # tenemos un margen configurado de 15 segundos entonces el backend programa enviar
+    # el reporte para reportOpensAt + 15 segundos.
+
+    report_due_at = (
+        _datetime(market["reportOpensAt"]) +
+        timedelta(seconds=settings.report_margin_seconds)
+        if "reportOpensAt" in market
+        else valid_until - timedelta(seconds=settings.report_closing_seconds -
+                                     settings.report_margin_seconds)
     )
 
     await _ensure_cycle(session, cycle_id, now)
@@ -157,7 +171,8 @@ async def _apply_status_statement(
         session,
         message,
         cycle_id,
-        energy_delta=status_statement_energy(generation, consumption),
+        # v3: KWH se obtiene de wallet no del status-statement
+        energy_delta=Decimal(0),
         budget_delta=Decimal(0),
     )
     return APPLIED if recorded else DUPLICATE
@@ -168,7 +183,8 @@ async def _apply_transfer(
 ) -> str:
     because_of = message["data"].get("becauseOf")
     if because_of is not None:
-        return await _apply_give_payment(session, message, because_of)
+        return IGNORED  # Si llega un transfer relacionado con una negociación antigua,
+        # el backend ya no lo procesa como un pago.
 
     cycle_id = message["cycleId"]
     await _ensure_cycle(session, cycle_id, now)
@@ -321,7 +337,8 @@ async def _apply_rejection(
 ) -> str:
     """`error` o `nack` de la central sobre una propuesta o un reporte nuestros."""
     target = message["data"]["target"]
-    reason = message.get("reason") or message["type"].upper()
+    reason = (message.get("reason") or message["data"].get("reason") or message["type"].upper()
+              )
 
     negotiation = await _negotiation_by_attempt(session, target)
     if negotiation is not None:
@@ -354,9 +371,6 @@ async def _apply_rejection(
 for _message_type, _handler in {
     "status-statement": _apply_status_statement,
     "transfer": _apply_transfer,
-    "demand-statement": _apply_demand_statement,
-    GIVE: _apply_confirmation,
-    TAKE: _apply_confirmation,
     "error": _apply_rejection,
     "nack": _apply_rejection,
     "distance-table": _apply_distance_table,
@@ -366,16 +380,16 @@ for _message_type, _handler in {
 
 # --- Trabajo con plazo: reporte, correcciones y timeouts ---------------------------------
 
-
+# la función que se ejecuta periódicamente para realizar tareas pendientes.
 async def run_due_work(session: AsyncSession, now: datetime, settings: Settings) -> None:
     """Encola lo que ya venció: reportes, correcciones y reintentos de propuestas.
 
     Se llama en cada retiro de la outbox. Las filas se toman con FOR UPDATE SKIP
     LOCKED: si las dos réplicas corren esto a la vez, cada fila la procesa una sola.
     """
+    # await _correct_stale_reports(session, now, settings)
+    # await _retry_or_expire_negotiations(session, now, settings) //ahora la wallet lo maneja
     await _send_due_reports(session, now, settings)
-    await _correct_stale_reports(session, now, settings)
-    await _retry_or_expire_negotiations(session, now, settings)
     await _request_missing_statements(session, now, settings)
     await session.commit()
 
@@ -415,17 +429,24 @@ async def _correct_stale_reports(session: AsyncSession, now: datetime, settings:
     for cycle in stale.scalars().all():
         await _enqueue_report(session, cycle, str(uuid.uuid4()), now, settings)
 
+# es la funcion que construye el mensaje negotiation-report que se envía a la central.
+
 
 async def _enqueue_report(
     session: AsyncSession, cycle: CycleLedger, idpk: str, now: datetime, settings: Settings
 ) -> None:
     budget = await total_budget(session)
+    # el reporte se hace con la info del wallet
+    wallet_kwh = await session.get(WalletBalance, "KWH")
+    energy_balance = (Decimal(wallet_kwh.available) + Decimal(wallet_kwh.held)
+                      if wallet_kwh is not None else cycle.energy_balance)
+
     envelope = _envelope(
         "negotiation-report",
         idpk,
         cycle.cycle_id,
         {"budgetBalance": _number(budget), "energyBalance": _number(
-            cycle.energy_balance)},
+            energy_balance)},
         now,
         settings,
     )
@@ -433,7 +454,7 @@ async def _enqueue_report(
     cycle.report_msg_id = envelope["msgId"]
     cycle.report_sent_at = now
     cycle.reported_budget = budget
-    cycle.reported_energy = cycle.energy_balance
+    cycle.reported_energy = energy_balance
     await _enqueue(session, f"report:{cycle.cycle_id}:{envelope['msgId']}", envelope)
 
 
@@ -698,7 +719,10 @@ async def get_cycle_report(session: AsyncSession, cycle: CycleLedger) -> dict | 
 
 
 async def budget_at_close(session: AsyncSession, cycle: CycleLedger) -> Decimal:
-    """Presupuesto al cierre del ciclo: lo acumulado hasta él, incluido."""
+    """Presupuesto histórico del ciclo en el ledger, 
+    no es el saldo oficial de la wallet
+    (no sustituye GET /balance)
+    """
     summed = await session.execute(
         select(func.coalesce(func.sum(CycleLedger.budget_delta), 0)).where(
             CycleLedger.created_at <= cycle.created_at
@@ -761,7 +785,15 @@ async def count_message_log(session: AsyncSession, category: str | None) -> int:
 
 
 async def total_budget(session: AsyncSession) -> Decimal:
-    """Presupuesto actual: la suma de todos los eventos, porque se traspasa entre ciclos."""
+    """
+    Saldo de creditos (CR) oficial conocido; usa proyección histórica sólo antes 
+    de la primera sincronización con la wallet. 
+    """
+
+    # la ultima actualizacion de la wallet en local, no es en tiempo real
+    wallet = await session.get(WalletBalance, "CR")
+    if wallet is not None:
+        return Decimal(wallet.available) + Decimal(wallet.held)
     summed = await session.execute(select(func.coalesce(func.sum(LedgerEvent.budget_delta), 0)))
     return Decimal(summed.scalar_one())
 
@@ -917,3 +949,7 @@ def _datetime(value: str) -> datetime:
 def _number(value: Decimal) -> int | float:
     """Número JSON: entero si no tiene decimales, para no publicar 131212.0."""
     return int(value) if value == value.to_integral_value() else float(value)
+
+
+# Los handlers v3 se registran desde su propio módulo; no se edita el diccionario E1.
+from app.wallet import eventos as _wallet_handlers  # noqa: E402,F401

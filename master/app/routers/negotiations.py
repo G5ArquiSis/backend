@@ -4,18 +4,16 @@
 Solo traduce entre HTTP y la capa de datos; ninguna query vive acá.
 """
 
-from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.cycle_repository import (
-    NegotiationNotAllowedError,
     budget_at_close,
     count_message_log,
-    create_negotiation,
     current_distance_table,
     get_cycle,
     get_cycle_report,
@@ -41,8 +39,9 @@ from app.cycle_schemas import (
     NegotiationOut,
 )
 from app.database import get_session
-from app.models import LedgerEvent
+from app.models import LedgerEvent, WalletBalance, WalletEvent, WalletStatements
 from app.schemas import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from app.wallet.reconciliacion import latest_reconciliation
 
 router = APIRouter(tags=["negotiations"])
 
@@ -50,31 +49,14 @@ SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
 
 
-@router.post("/negotiations", response_model=NegotiationOut, status_code=status.HTTP_201_CREATED)
+@router.post("/negotiations", status_code=status.HTTP_410_GONE)
 async def propose_negotiation(
     proposal: NegotiationIn, session: SessionDependency, settings: SettingsDependency
 ) -> NegotiationOut:
-    """Crea una propuesta para el ciclo abierto; se publica a la central en segundos.
-
-    Responde 409 con el motivo si no hay ventana abierta, si el precio supera el
-    tope o si un `give` excede la energía vendible.
-    """
-    try:
-        negotiation = await create_negotiation(
-            session,
-            proposal.direction,
-            proposal.quantity,
-            proposal.price_per_energy,
-            datetime.now(UTC),
-            settings,
-        )
-    except NegotiationNotAllowedError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": error.reason, "message": str(error)},
-        ) from error
-
-    return NegotiationOut.model_validate(negotiation)
+    """El protocolo v3 retira la creación HTTP de negociaciones E1."""
+    # se debe responder con un error 410
+    raise HTTPException(
+        status_code=410, detail="negotiation-proposal retirado en el protocolo v3")
 
 
 @router.get("/negotiations", response_model=list[NegotiationOut])
@@ -124,11 +106,23 @@ async def read_cycle(cycle_id: str, session: SessionDependency) -> CycleDetail:
     """
     cycle = await get_cycle(session, cycle_id)
     if cycle is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ciclo no encontrado")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Ciclo no encontrado")
 
     events = await list_cycle_events(session, cycle_id)
-    operations = [_to_operation(event, cycle.last_operation_idpk) for event in events]
+    operations = [_to_operation(event, cycle.last_operation_idpk)
+                  for event in events]
     negotiations = await list_cycle_negotiations(session, cycle_id)
+
+    wallet_events = (await session.execute(
+        select(WalletEvent).where(WalletEvent.cycle_id == cycle_id)
+        .order_by(WalletEvent.id)
+    )).scalars().all()
+
+    statement = (await session.execute(
+        select(WalletStatements).where(WalletStatements.cycle_id == cycle_id)
+        .order_by(WalletStatements.entry_id)
+    )).scalars().all()
 
     return CycleDetail(
         cycle_id=cycle.cycle_id,
@@ -137,11 +131,13 @@ async def read_cycle(cycle_id: str, session: SessionDependency) -> CycleDetail:
         status_statement=next(
             (event.payload for event in events if event.kind == "status-statement"), None
         ),
-        transfers=[operation for operation in operations if operation.kind == "transfer"],
+        transfers=[
+            operation for operation in operations if operation.kind == "transfer"],
         demand_statements=[
             operation for operation in operations if operation.kind == "demand-statement"
         ],
-        negotiations=[NegotiationOut.model_validate(negotiation) for negotiation in negotiations],
+        negotiations=[NegotiationOut.model_validate(
+            negotiation) for negotiation in negotiations],
         report=await get_cycle_report(session, cycle),
         report_sent_at=cycle.report_sent_at,
         report_error=cycle.report_error,
@@ -150,6 +146,10 @@ async def read_cycle(cycle_id: str, session: SessionDependency) -> CycleDetail:
         ),
         last_operation_idpk=cycle.last_operation_idpk,
         operations=operations,
+        wallet_events=[event.payload for event in wallet_events],
+        wallet_statement=[asiento.payload for asiento in statement],
+        market_messages=[],  # esto debe ser definido por los roles C y D
+        reconciliation=await latest_reconciliation(session, cycle_id),
     )
 
 
@@ -216,7 +216,8 @@ def _to_connection(destination: str, route: object) -> Connection:
         destination=destination,
         distance=_number_or_none(fields.get("distance")),
         transport_cost=_number_or_none(fields.get("transportCost")),
-        enabled=fields.get("enabled") if isinstance(fields.get("enabled"), bool) else None,
+        enabled=fields.get("enabled") if isinstance(
+            fields.get("enabled"), bool) else None,
     )
 
 
@@ -224,3 +225,18 @@ def _number_or_none(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value)
+
+
+@router.get("/wallet/balance-status")
+async def wallet_balance_status(session: SessionDependency):
+    """
+    este endpoint entrega el ultimo balance oficial sincronizado y el delta detectado.
+    decision (AD5).
+    """
+
+    rows = (await session.execute(select(WalletBalance))).scalars().all()
+    return {"assets": {r.asset: {"available": str(r.available), "held": str(r.held),
+                                 "creditLine": str(r.credit_line) if r.credit_line is not None
+                                 else None,
+                                 "asOf": r.as_of, "source": r.source} for r in rows},
+            "lastReconciliation": await latest_reconciliation(session)}

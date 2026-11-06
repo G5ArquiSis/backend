@@ -21,6 +21,8 @@ from app.cycle_repository import (
 )
 from app.cycle_schemas import ApplyResult, MessageLogEntry, OutboxItem, UnappliedMessageIn
 from app.database import get_session
+from app.wallet.client import WalletClient
+from app.wallet.reconciliacion import reconcile
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 
@@ -67,7 +69,8 @@ async def claim_pending_messages(
 async def confirm_message_sent(message_id: int, session: SessionDependency) -> None:
     """connector confirma que publicó el mensaje; deja de ofrecerse."""
     if not await mark_outbox_sent(session, message_id, datetime.now(UTC)):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mensaje no encontrado")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Mensaje no encontrado")
 
 
 @router.post("/message-log", response_model=MessageLogEntry, status_code=status.HTTP_201_CREATED)
@@ -84,3 +87,18 @@ async def log_unapplied_message(
     )
 
     return MessageLogEntry.model_validate(stored)
+
+
+@router.post("/wallet/reconcile")
+async def reconcile_wallet(session: SessionDependency, settings: SettingsDependency):
+    """
+    este enpoint se debe invocar cada vez que se quiera reconciliar el estado de la 
+    wallet con el ledger local de la ciudad. No se invoca automaticamente desde conector.
+    Es decision del rol E en su scheduler
+    """
+
+    if not settings.wallet_base_url or not settings.wallet_api_key:
+        raise HTTPException(status_code=503, detail="Wallet sin configurar")
+
+    async with WalletClient(settings.wallet_base_url, settings.wallet_api_key) as wallet:
+        return await reconcile(session, wallet)
