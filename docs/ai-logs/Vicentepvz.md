@@ -72,3 +72,18 @@
 - **Correcciones del integrante:** No hubo modificaciones.
 - **Referencia:** Rama `feature/ledger-implementation`.
 
+## 2026-11-06 — Contrato interno I1: outbox con destino (Tarea A0 de E2)
+- **Herramienta y modo:** Antigravity, Gemini 3.8 Flash, agéntico.
+- **Tarea:** Implementar el contrato interno I1 (Tarea A0 de E2) definiendo la firma de `enqueue_publish(session, dedupe_key, payload, destination)` con `destination ∈ {CENTRAL, MARKET_OFFER, CITY(code)}`. Provee un stub funcional compatible con la base de datos actual y desacopla la lógica de outbox para destrabar el desarrollo en paralelo de los roles C (vendedor) y D (comprador).
+- **Prompts relevantes:**
+  > "Haz los cambios del paso 1, te dejo adjuntado lo que se referencia de la api v3:"
+- **Qué produjo la IA:**
+  - `master/app/outbox.py`: Módulo que introduce `DestinationType`, `Destination`, normalizador `parse_destination` y la función `enqueue_publish`. Resuelve destinos a sus pares `(exchange, routing_key)` según el protocolo v3 y las credenciales de TAL (`energy.x/central`, `market/market.offer.TAL`, `energy.x/city.{code}`).
+  - `master/app/models.py`: Actualización del docstring del modelo `OutboxMessage` documentando las nuevas columnas `exchange` y `routing_key` que se migrarán a nivel de esquema en la Tarea A4.
+  - `master/app/cycle_repository.py`: Delegación de la función interna `_enqueue` a `enqueue_publish(..., Destination.CENTRAL)` y reexportación de tipos para preservar retrocompatibilidad.
+  - `master/tests/test_outbox.py`: Suite de tests unitarios que cubre resolución de exchanges/routing keys para cada destino, validación de formatos, rechazo de destinos inválidos y ejecución de encolado atómico con `dedupe_key`.
+- **Verificación:** Validación de compilación limpia con `py_compile` en todos los archivos modificados y ejecución exitosa de los tests de `test_outbox.py`.
+- **Correcciones del integrante:** Ninguna requerida; implementación probada y verificada.
+- **Referencia:** Rama `feat/a0-outbox-destino`.
+
+

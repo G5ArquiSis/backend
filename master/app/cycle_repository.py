@@ -36,7 +36,6 @@ from app.ledger import (
     negotiation_deltas,
     price_cap,
     sellable_energy,
-    status_statement_energy,
     total_amount,
 )
 from app.models import (
@@ -46,7 +45,9 @@ from app.models import (
     MessageLog,
     Negotiation,
     OutboxMessage,
+    WalletBalance,  # para consultar los saldos oficiales que tiene la wallet
 )
+from app.outbox import Destination, enqueue_publish
 
 PENDING = "pending"
 CONFIRMED = "confirmed"
@@ -106,10 +107,12 @@ async def apply_central_message(
         outcome = await handler(session, message, now, settings)
     except (KeyError, TypeError, InvalidOperation, ValueError) as error:
         await session.rollback()
-        raise MalformedMessageError(
-            f"{message.get('type')}: {error!r}") from error
+        raise MalformedMessageError(f"{message.get('type')}: {error!r}") from error
 
     if outcome == APPLIED:
+        from app.wallet.history import record_market_message
+
+        await record_market_message(session, message)
         await session.commit()
         return outcome
 
@@ -132,8 +135,21 @@ async def _apply_status_statement(
     generation = _decimal(energy["generationCapacity"])
     consumption = _decimal(energy["consumption"])
     valid_until = _datetime(message["data"]["validUntil"])
-    report_due_at = valid_until - timedelta(
-        seconds=settings.report_closing_seconds - settings.report_margin_seconds
+
+    market = message["data"].get("market", {})
+
+    # para esta entrega la central informa cuándo comienza el periodo para enviar el
+    # negotiation-report
+    # la hora en que comienza el periodo de cierre (donde se debe enviar el reporte)
+    # viene en reportOpensAt,
+    # tenemos un margen configurado de 15 segundos entonces el backend programa enviar
+    # el reporte para reportOpensAt + 15 segundos.
+
+    report_due_at = (
+        _datetime(market["reportOpensAt"]) + timedelta(seconds=settings.report_margin_seconds)
+        if "reportOpensAt" in market
+        else valid_until
+        - timedelta(seconds=settings.report_closing_seconds - settings.report_margin_seconds)
     )
 
     await _ensure_cycle(session, cycle_id, now)
@@ -158,7 +174,8 @@ async def _apply_status_statement(
         session,
         message,
         cycle_id,
-        energy_delta=status_statement_energy(generation, consumption),
+        # v3: KWH se obtiene de wallet no del status-statement
+        energy_delta=Decimal(0),
         budget_delta=Decimal(0),
     )
     return APPLIED if recorded else DUPLICATE
@@ -169,7 +186,8 @@ async def _apply_transfer(
 ) -> str:
     because_of = message["data"].get("becauseOf")
     if because_of is not None:
-        return await _apply_give_payment(session, message, because_of)
+        return IGNORED  # Si llega un transfer relacionado con una negociación antigua,
+        # el backend ya no lo procesa como un pago.
 
     cycle_id = message["cycleId"]
     await _ensure_cycle(session, cycle_id, now)
@@ -180,6 +198,25 @@ async def _apply_transfer(
         energy_delta=Decimal(0),
         budget_delta=_decimal(message["data"]["quantity"]),
     )
+    if recorded and "balanceAfter" in message["data"]:
+        from app.wallet.balances import lock_balances, update_balances
+
+        await lock_balances(session)
+        row = await session.get(WalletBalance, "CR", populate_existing=True)
+        held = row.held if row is not None else Decimal(0)
+        await update_balances(
+            session,
+            {
+                "CR": {
+                    "available": _decimal(message["data"]["balanceAfter"]),
+                    "held": held,
+                    "creditLine": message["data"]["creditLine"],
+                }
+            },
+            _datetime(message["timestamp"]),
+            "transfer",
+            message["idpk"],
+        )
     return APPLIED if recorded else DUPLICATE
 
 
@@ -223,8 +260,7 @@ async def _apply_confirmation(
             .where(Negotiation.id == negotiation.id, Negotiation.state.in_(_AWAITING_CONFIRMATION))
             .values(
                 state=CONFIRMED,
-                deadline_at=now +
-                timedelta(seconds=settings.negotiation_timeout_seconds),
+                deadline_at=now + timedelta(seconds=settings.negotiation_timeout_seconds),
                 **confirmation,
             )
         )
@@ -286,8 +322,7 @@ async def _apply_give_payment(session: AsyncSession, message: dict, because_of: 
     if paid.rowcount != 1:
         return DUPLICATE
 
-    energy_delta, budget_delta = negotiation_deltas(
-        GIVE, negotiation.confirmed_energy, amount)
+    energy_delta, budget_delta = negotiation_deltas(GIVE, negotiation.confirmed_energy, amount)
     recorded = await _record_event(
         session,
         message,
@@ -310,11 +345,16 @@ async def _apply_distance_table(
 
     inserted = await session.execute(
         postgres_insert(DistanceTable)
-        .values(idpk=message["idpk"], distances=distances)
+        .values(idpk=message["idpk"], distances=distances, payload=message)
         .on_conflict_do_nothing(index_elements=["idpk"])
         .returning(DistanceTable.id)
     )
-    return APPLIED if inserted.scalar_one_or_none() is not None else DUPLICATE
+    if inserted.scalar_one_or_none() is None:
+        return DUPLICATE
+    if message.get("cycleId"):
+        await _ensure_cycle(session, message["cycleId"], now)
+        await _record_event(session, message, message["cycleId"], Decimal(0), Decimal(0))
+    return APPLIED
 
 
 async def _apply_rejection(
@@ -322,7 +362,7 @@ async def _apply_rejection(
 ) -> str:
     """`error` o `nack` de la central sobre una propuesta o un reporte nuestros."""
     target = message["data"]["target"]
-    reason = message.get("reason") or message["type"].upper()
+    reason = message.get("reason") or message["data"].get("reason") or message["type"].upper()
 
     negotiation = await _negotiation_by_attempt(session, target)
     if negotiation is not None:
@@ -346,8 +386,7 @@ async def _apply_rejection(
         values = {"report_error": reason}
 
     reported = await session.execute(
-        update(CycleLedger).where(
-            CycleLedger.report_msg_id == target).values(**values)
+        update(CycleLedger).where(CycleLedger.report_msg_id == target).values(**values)
     )
     return APPLIED if reported.rowcount == 1 else IGNORED
 
@@ -355,9 +394,6 @@ async def _apply_rejection(
 for _message_type, _handler in {
     "status-statement": _apply_status_statement,
     "transfer": _apply_transfer,
-    "demand-statement": _apply_demand_statement,
-    GIVE: _apply_confirmation,
-    TAKE: _apply_confirmation,
     "error": _apply_rejection,
     "nack": _apply_rejection,
     "distance-table": _apply_distance_table,
@@ -368,15 +404,16 @@ for _message_type, _handler in {
 # --- Trabajo con plazo: reporte, correcciones y timeouts ---------------------------------
 
 
+# la función que se ejecuta periódicamente para realizar tareas pendientes.
 async def run_due_work(session: AsyncSession, now: datetime, settings: Settings) -> None:
     """Encola lo que ya venció: reportes, correcciones y reintentos de propuestas.
 
     Se llama en cada retiro de la outbox. Las filas se toman con FOR UPDATE SKIP
     LOCKED: si las dos réplicas corren esto a la vez, cada fila la procesa una sola.
     """
-    await _send_due_reports(session, now, settings)
     await _correct_stale_reports(session, now, settings)
-    await _retry_or_expire_negotiations(session, now, settings)
+    # await _retry_or_expire_negotiations(session, now, settings) //ahora la wallet lo maneja
+    await _send_due_reports(session, now, settings)
     await _request_missing_statements(session, now, settings)
     closed = await _mark_closed_cycles(session, now)
     await session.commit()
@@ -425,33 +462,51 @@ async def _send_due_reports(session: AsyncSession, now: datetime, settings: Sett
 
 
 async def _correct_stale_reports(session: AsyncSession, now: datetime, settings: Settings) -> None:
-    """Si el ledger cambió después de reportar, envía una corrección con idpk nuevo."""
     budget = await total_budget(session)
-    stale = await session.execute(
-        select(CycleLedger)
-        .where(
-            CycleLedger.report_sent_at.is_not(None),
-            CycleLedger.report_error.is_(None),
-            CycleLedger.valid_until > now,
-            (CycleLedger.reported_energy != CycleLedger.energy_balance)
-            | (CycleLedger.reported_budget != budget),
+    kwh = await session.get(WalletBalance, "KWH")
+    if kwh is None:
+        return
+    energy = Decimal(kwh.available) + Decimal(kwh.held)
+    cycles = (
+        (
+            await session.execute(
+                select(CycleLedger)
+                .where(
+                    CycleLedger.report_sent_at.is_not(None),
+                    CycleLedger.report_error.is_(None),
+                    CycleLedger.valid_until > now,
+                )
+                .with_for_update(skip_locked=True)
+            )
         )
-        .with_for_update(skip_locked=True)
+        .scalars()
+        .all()
     )
-    for cycle in stale.scalars().all():
-        await _enqueue_report(session, cycle, str(uuid.uuid4()), now, settings)
+    for cycle in cycles:
+        if cycle.reported_energy != energy or cycle.reported_budget != budget:
+            await _enqueue_report(session, cycle, str(uuid.uuid4()), now, settings)
+
+
+# es la funcion que construye el mensaje negotiation-report que se envía a la central.
 
 
 async def _enqueue_report(
     session: AsyncSession, cycle: CycleLedger, idpk: str, now: datetime, settings: Settings
 ) -> None:
     budget = await total_budget(session)
+    # el reporte se hace con la info del wallet
+    wallet_kwh = await session.get(WalletBalance, "KWH")
+    energy_balance = (
+        Decimal(wallet_kwh.available) + Decimal(wallet_kwh.held)
+        if wallet_kwh is not None
+        else cycle.energy_balance
+    )
+
     envelope = _envelope(
         "negotiation-report",
         idpk,
         cycle.cycle_id,
-        {"budgetBalance": _number(budget), "energyBalance": _number(
-            cycle.energy_balance)},
+        {"budgetBalance": _number(budget), "energyBalance": _number(energy_balance)},
         now,
         settings,
     )
@@ -459,7 +514,7 @@ async def _enqueue_report(
     cycle.report_msg_id = envelope["msgId"]
     cycle.report_sent_at = now
     cycle.reported_budget = budget
-    cycle.reported_energy = cycle.energy_balance
+    cycle.reported_energy = energy_balance
     await _enqueue(session, f"report:{cycle.cycle_id}:{envelope['msgId']}", envelope)
 
 
@@ -486,8 +541,7 @@ async def _retry_or_expire_negotiations(
         # enunciado pide asumir que no hubo operación y reintentarla.
         negotiation.attempts += 1
         negotiation.state = PENDING
-        negotiation.deadline_at = now + \
-            timedelta(seconds=settings.negotiation_timeout_seconds)
+        negotiation.deadline_at = now + timedelta(seconds=settings.negotiation_timeout_seconds)
         envelope = _proposal_envelope(negotiation, now, settings)
         negotiation.msg_ids = [*negotiation.msg_ids, envelope["msgId"]]
         await _enqueue(session, f"proposal:{negotiation.id}:{negotiation.attempts}", envelope)
@@ -526,15 +580,13 @@ async def _request_missing_statements(
             .select_from(OutboxMessage)
             .where(OutboxMessage.dedupe_key.startswith(prefix))
         )
-        due = min(int((now - cycle.created_at - grace) /
-                  interval) + 1, max_attempts)
+        due = min(int((now - cycle.created_at - grace) / interval) + 1, max_attempts)
         if sent >= due:
             continue
 
         attempt = sent + 1
         await _enqueue(
-            session, f"{prefix}{attempt}", _request_envelope(
-                "status-statement", now, settings)
+            session, f"{prefix}{attempt}", _request_envelope("status-statement", now, settings)
         )
         if await current_distance_table(session) is None:
             await _enqueue(
@@ -561,8 +613,7 @@ async def claim_outbox(
         select(OutboxMessage)
         .where(
             OutboxMessage.sent_at.is_(None),
-            (OutboxMessage.claimed_at.is_(None)) | (
-                OutboxMessage.claimed_at <= stale_before),
+            (OutboxMessage.claimed_at.is_(None)) | (OutboxMessage.claimed_at <= stale_before),
         )
         .order_by(OutboxMessage.id)
         .limit(_OUTBOX_BATCH)
@@ -578,8 +629,7 @@ async def claim_outbox(
 async def mark_outbox_sent(session: AsyncSession, message_id: int, now: datetime) -> bool:
     """Registra que connector publicó el mensaje. Devuelve False si no existe."""
     marked = await session.execute(
-        update(OutboxMessage).where(
-            OutboxMessage.id == message_id).values(sent_at=now)
+        update(OutboxMessage).where(OutboxMessage.id == message_id).values(sent_at=now)
     )
     await session.commit()
     return marked.rowcount == 1
@@ -632,8 +682,7 @@ async def create_negotiation(
                 Negotiation.state.in_(_LIVE),
             )
         )
-        sellable = sellable_energy(
-            cycle.generation_capacity, cycle.consumption)
+        sellable = sellable_energy(cycle.generation_capacity, cycle.consumption)
         spare = sellable - committed.scalar_one()
         if quantity > spare:
             raise NegotiationNotAllowedError(
@@ -649,8 +698,7 @@ async def create_negotiation(
         state=PENDING,
         attempts=1,
         msg_ids=[],
-        deadline_at=now +
-        timedelta(seconds=settings.negotiation_timeout_seconds),
+        deadline_at=now + timedelta(seconds=settings.negotiation_timeout_seconds),
     )
     session.add(negotiation)
     await session.flush()
@@ -673,8 +721,7 @@ async def list_negotiations(
 ) -> Sequence[Negotiation]:
     """Historial de negociaciones, de la más reciente a la más antigua, siempre acotado."""
     found = await session.execute(
-        select(Negotiation).order_by(
-            Negotiation.id.desc()).limit(limit).offset(offset)
+        select(Negotiation).order_by(Negotiation.id.desc()).limit(limit).offset(offset)
     )
     return found.scalars().all()
 
@@ -697,16 +744,14 @@ async def get_cycle(session: AsyncSession, cycle_id: str) -> CycleLedger | None:
 async def list_cycle_events(session: AsyncSession, cycle_id: str) -> Sequence[LedgerEvent]:
     """Operaciones aplicadas en el ciclo, en el orden en que se aplicaron."""
     found = await session.execute(
-        select(LedgerEvent).where(LedgerEvent.cycle_id ==
-                                  cycle_id).order_by(LedgerEvent.id)
+        select(LedgerEvent).where(LedgerEvent.cycle_id == cycle_id).order_by(LedgerEvent.id)
     )
     return found.scalars().all()
 
 
 async def list_cycle_negotiations(session: AsyncSession, cycle_id: str) -> Sequence[Negotiation]:
     found = await session.execute(
-        select(Negotiation).where(Negotiation.cycle_id ==
-                                  cycle_id).order_by(Negotiation.id)
+        select(Negotiation).where(Negotiation.cycle_id == cycle_id).order_by(Negotiation.id)
     )
     return found.scalars().all()
 
@@ -724,7 +769,27 @@ async def get_cycle_report(session: AsyncSession, cycle: CycleLedger) -> dict | 
 
 
 async def budget_at_close(session: AsyncSession, cycle: CycleLedger) -> Decimal:
-    """Presupuesto al cierre del ciclo: lo acumulado hasta él, incluido."""
+    """Presupuesto histórico del ciclo en el ledger,
+    no es el saldo oficial de la wallet
+    (no sustituye GET /balance)
+    """
+    from app.models import WalletEvent
+
+    settlement = (
+        await session.execute(
+            select(WalletEvent)
+            .where(
+                WalletEvent.cycle_id == cycle.cycle_id,
+                WalletEvent.event_type == "imbalance-settlement",
+            )
+            .order_by(WalletEvent.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if settlement is not None:
+        return _decimal(settlement.payload["data"]["balanceAfter"])
+    if cycle.reported_budget is not None:
+        return cycle.reported_budget
     summed = await session.execute(
         select(func.coalesce(func.sum(CycleLedger.budget_delta), 0)).where(
             CycleLedger.created_at <= cycle.created_at
@@ -772,8 +837,7 @@ async def list_message_log(
     statement = select(MessageLog)
     if category is not None:
         statement = statement.where(MessageLog.category == category)
-    statement = statement.order_by(
-        MessageLog.id.desc()).limit(limit).offset(offset)
+    statement = statement.order_by(MessageLog.id.desc()).limit(limit).offset(offset)
 
     return (await session.execute(statement)).scalars().all()
 
@@ -787,7 +851,15 @@ async def count_message_log(session: AsyncSession, category: str | None) -> int:
 
 
 async def total_budget(session: AsyncSession) -> Decimal:
-    """Presupuesto actual: la suma de todos los eventos, porque se traspasa entre ciclos."""
+    """
+    Saldo de creditos (CR) oficial conocido; usa proyección histórica sólo antes
+    de la primera sincronización con la wallet.
+    """
+
+    # la ultima actualizacion de la wallet en local, no es en tiempo real
+    wallet = await session.get(WalletBalance, "CR")
+    if wallet is not None:
+        return Decimal(wallet.available) + Decimal(wallet.held)
     summed = await session.execute(select(func.coalesce(func.sum(LedgerEvent.budget_delta), 0)))
     return Decimal(summed.scalar_one())
 
@@ -864,11 +936,7 @@ async def _negotiation_by_attempt(session: AsyncSession, msg_id: str) -> Negotia
 
 
 async def _enqueue(session: AsyncSession, dedupe_key: str, payload: dict) -> None:
-    await session.execute(
-        postgres_insert(OutboxMessage)
-        .values(dedupe_key=dedupe_key, payload=payload)
-        .on_conflict_do_nothing(index_elements=["dedupe_key"])
-    )
+    await enqueue_publish(session, dedupe_key, payload, Destination.CENTRAL)
 
 
 def _proposal_envelope(negotiation: Negotiation, now: datetime, settings: Settings) -> dict:
@@ -943,3 +1011,7 @@ def _datetime(value: str) -> datetime:
 def _number(value: Decimal) -> int | float:
     """Número JSON: entero si no tiene decimales, para no publicar 131212.0."""
     return int(value) if value == value.to_integral_value() else float(value)
+
+
+# Los handlers v3 se registran desde su propio módulo; no se edita el diccionario E1.
+from app.wallet import eventos as _wallet_handlers  # noqa: E402,F401

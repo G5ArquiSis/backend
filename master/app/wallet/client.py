@@ -1,4 +1,5 @@
 """Cliente asíncrono v3: escrituras idempotentes y lecturas con límite local."""
+
 import asyncio
 import time
 from collections import deque
@@ -10,6 +11,7 @@ from typing import Any
 import httpx
 
 from app import metrics
+from app.wallet.schemas import BalanceResponse, LeaderboardResponse, StatementPage, SwapResponse
 
 
 class WalletError(Exception):
@@ -20,10 +22,11 @@ class WalletError(Exception):
 
 
 class RateLimiter:
-
     "clase para controlar/limitar las lecturas y escrituras a la wallet por minuto."
 
     def __init__(self, maximum: int):
+        if maximum < 1:
+            raise ValueError("El límite debe ser positivo")
         self.maximum = maximum
         self._timestamps = deque()
         self._lock = asyncio.Lock()
@@ -61,25 +64,44 @@ class WalletClient:
     El resultado final de la transaccion llega despues como un evento a la cola city.code
     """
 
-    def __init__(self, base_url: str, api_key: str, *, transport=None,
-                 timeout: float = 20.0, max_attempts: int = 4,
-                 hook: Callable[[str, str, int | None, float], None] | None = None):
+    _shared_limiters: dict[tuple[str, str], tuple[RateLimiter, RateLimiter]] = {}
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        *,
+        transport=None,
+        timeout: float = 20.0,
+        max_attempts: int = 4,
+        hook: Callable[[str, str, int | None, float], None] | None = None,
+    ):
 
         if not base_url or not api_key:
-            raise ValueError(
-                "WALLET_BASE_URL y WALLET_API_KEY son obligatorias")
+            raise ValueError("WALLET_BASE_URL y WALLET_API_KEY son obligatorias")
 
-        self._client = httpx.AsyncClient(base_url=base_url.rstrip('/') + '/',
-                                         headers={'X-Api-Key': api_key},
-                                         timeout=timeout, transport=transport)
+        self._client = httpx.AsyncClient(
+            base_url=base_url.rstrip("/") + "/",
+            headers={"X-Api-Key": api_key},
+            timeout=timeout,
+            transport=transport,
+        )
 
         # maximo de 120 escrituras por minuto en la wallet
-        self._writes = RateLimiter(120)
-        # maximo de 300 lecturas por minuto en la wallet
-        self._reads = RateLimiter(300)
+        # Presupuesto conservador para las dos réplicas; compartido entre clientes.
+        key = (base_url.rstrip("/"), api_key)
+        if key not in self._shared_limiters:
+            self._shared_limiters[key] = (RateLimiter(60), RateLimiter(150))
+        self._writes, self._reads = self._shared_limiters[key]
         self.max_attempts = max(1, max_attempts)
         # Por defecto cada intento queda en New Relic como evento WalletCall (RNF05).
         self.hook = hook if hook is not None else metrics.wallet_call_hook
+
+    def configure_limits(self, *, walletWritesPerMinute=120, walletReadsPerMinute=300, **_):
+        if walletWritesPerMinute < 2 or walletReadsPerMinute < 2:
+            raise ValueError("Límites wallet insuficientes para dos réplicas")
+        self._writes.maximum = min(120, walletWritesPerMinute) // 2
+        self._reads.maximum = min(300, walletReadsPerMinute) // 2
 
     async def aclose(self):
         await self._client.aclose()
@@ -90,30 +112,28 @@ class WalletClient:
     async def __aexit__(self, *_):
         await self.aclose()
 
-    async def _request(self, method: str, path: str, *, idempotency_key=None,
-                       json=None, params=None):
+    async def _request(
+        self, method: str, path: str, *, idempotency_key=None, json=None, params=None
+    ):
 
-        if method == 'POST' and not idempotency_key:
-            raise ValueError(
-                'Idempotency-Key es obligatoria para escrituras en la wallet')
+        if method == "POST" and not idempotency_key:
+            raise ValueError("Idempotency-Key es obligatoria para escrituras en la wallet")
 
-        headers = {
-            'Idempotency-Key': str(idempotency_key)} if method == 'POST' else {}
+        headers = {"Idempotency-Key": str(idempotency_key)} if method == "POST" else {}
 
         for attempt in range(self.max_attempts):
-
-            await (self._writes if method == 'POST' else self._reads).acquire()
+            await (self._writes if method == "POST" else self._reads).acquire()
             start = time.monotonic()
             status = None
 
             try:
-                response = await self._client.request(method, path.lstrip('/'),
-                                                      headers=headers, json=json, params=params)
+                response = await self._client.request(
+                    method, path.lstrip("/"), headers=headers, json=json, params=params
+                )
                 status = response.status_code
 
                 if status in (429, 502, 503, 504) and attempt + 1 < self.max_attempts:
-                    delay = retry_after(response.headers.get(
-                        'Retry-After'), min(2 ** attempt, 8))
+                    delay = retry_after(response.headers.get("Retry-After"), min(2**attempt, 8))
 
                 else:
                     if status >= 400:
@@ -127,17 +147,18 @@ class WalletClient:
             except (httpx.TimeoutException, httpx.TransportError):
                 if attempt + 1 == self.max_attempts:
                     raise
-                delay = min(2 ** attempt, 8)
+                delay = min(2**attempt, 8)
 
             finally:
                 if self.hook:
                     self.hook(method, path, status, time.monotonic() - start)
             await asyncio.sleep(delay)
 
-        raise RuntimeError('Reintentos agotados')
+        raise RuntimeError("Reintentos agotados")
 
-    async def propose_swap(self, give: dict, take: dict, expires_at: str,
-                           memo: str, idempotency_key: str):
+    async def propose_swap(
+        self, give: dict, take: dict, expires_at: str, memo: str, idempotency_key: str
+    ):
 
         # give es un dict con asset (el activo es la energía) y amount (cantidad de kwh que ofrece)
         # take es un dict con asset (el activo es el credito) y amount (lo que cuesta en total
@@ -145,31 +166,33 @@ class WalletClient:
         # Ejemplo: give = {"asset": "kwh", "amount": 10}, take = {"asset": "credits", "amount": 100}
         # lo que se retiene es el Give (kwh) de la cuenta del proponente
 
-        json_propose = {'give': give, 'take': take,
-                        'expiresAt': expires_at, 'memo': memo}
+        json_propose = {"give": give, "take": take, "expiresAt": expires_at, "memo": memo}
 
-        return await self._request('POST', 'swaps', idempotency_key=idempotency_key,
-                                   json=json_propose)
+        return await self._request(
+            "POST", "swaps", idempotency_key=idempotency_key, json=json_propose
+        )
 
-    async def accept_swap(self, swap_id: str, idempotency_key: str):
+    async def accept_swap(self, swap_id: str, idempotency_key: str) -> SwapResponse:
 
         # se aplica cuando el swap propuesto es aceptado por alguna ciudad.
         # se retiene el take (creditos) de la cuenta del comprador.
 
-        return await self._request('POST', f'swaps/{swap_id}/accept',
-                                   idempotency_key=idempotency_key)
+        return await self._request(
+            "POST", f"swaps/{swap_id}/accept", idempotency_key=idempotency_key
+        )
 
-    async def cancel_swap(self, swap_id: str, idempotency_key: str):
+    async def cancel_swap(self, swap_id: str, idempotency_key: str) -> SwapResponse:
 
         # cancela una propuesta no aceptada por nadie.
         # se libera la retención del give (kwh) de la cuenta del proponente.
 
-        return await self._request('POST', f'swaps/{swap_id}/cancel',
-                                   idempotency_key=idempotency_key)
+        return await self._request(
+            "POST", f"swaps/{swap_id}/cancel", idempotency_key=idempotency_key
+        )
 
     # lecturas de la wallet (no requieren idempotency key, no retienen nada, no generan eventos):
 
-    async def get_swap_id(self, swap_id: str):
+    async def get_swap(self, swap_id: str) -> SwapResponse:
 
         # se muestra el estado del swap: accepted, proposed, settled, cancelled,
         # expired, rejected, y el último evento.
@@ -177,27 +200,31 @@ class WalletClient:
         # muestra en lastEvent.data.balancesAfter los saldos propios de quien lee
         # (quien tiene el swapId), en el instante de la lectura, nunca los de otra ciudad.
 
-        return await self._request('GET', f'swaps/{swap_id}')
+        return await self._request("GET", f"swaps/{swap_id}")
 
-    async def get_balance(self):
+    get_swap_id = get_swap
+
+    async def get_balance(self) -> BalanceResponse:
 
         # entrega el json con los saldos de kwh y creditos de la ciudad que hace la lectura,
         # en el instante de la lectura.
 
-        return await self._request('GET', 'balance')
+        return await self._request("GET", "balance")
 
-    async def get_statement(self, *, cycle_id=None, asset=None, cursor=None, limit=None):
+    async def get_statement(
+        self, *, cycle_id=None, asset=None, cursor=None, limit=None
+    ) -> StatementPage:
 
         # es para consultar los movimientos de la wallet de la ciudad que hace la lectura,
         # en el instante de la lectura.
 
-        params = {'cycleId': cycle_id, 'asset': asset,
-                  'cursor': cursor, 'limit': limit}
-        return await self._request('GET', 'statement', params={k: v for k, v in params.items()
-                                                               if v is not None})
+        params = {"cycleId": cycle_id, "asset": asset, "cursor": cursor, "limit": limit}
+        return await self._request(
+            "GET", "statement", params={k: v for k, v in params.items() if v is not None}
+        )
 
-    async def get_leaderboard(self):
+    async def get_leaderboard(self) -> LeaderboardResponse:
 
         # es para consultar la clasificación de ciudades
 
-        return await self._request('GET', 'leaderboard')
+        return await self._request("GET", "leaderboard")

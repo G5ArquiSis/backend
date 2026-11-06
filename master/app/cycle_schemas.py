@@ -97,7 +97,12 @@ class CycleBalances(CamelCaseModel):
 
 
 class CycleDetail(CamelCaseModel):
-    """Todo lo que pasó en un ciclo, en un solo documento (RF01)."""
+    """Todo lo que pasó en un ciclo, en un solo documento (RF01).
+
+    ahora se incluyen los eventos de wallet, los asientos oficiales, los mensajes de mercado
+    y la reconciliación, para que sean mostrados en la vista del detalle del ciclo.
+
+    """
 
     cycle_id: str
     opened: bool
@@ -108,10 +113,17 @@ class CycleDetail(CamelCaseModel):
     negotiations: list[NegotiationOut]
     report: dict | None
     report_sent_at: datetime | None
+    report_queued_at: datetime | None = None
     report_error: str | None
     balances: CycleBalances
     last_operation_idpk: str | None
     operations: list[LedgerEventOut]
+    wallet_events: list[dict] = Field(default_factory=list)
+    wallet_statement: list[dict] = Field(default_factory=list)
+    market_messages: list[dict] = Field(default_factory=list)
+    reconciliation: dict | None = None
+    swaps: list[dict] = Field(default_factory=list)
+    distance_table: dict | None = None
 
 
 class Connection(CamelCaseModel):

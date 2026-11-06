@@ -51,7 +51,9 @@ _Energy = Numeric(20, 4)
 
 
 class LedgerEvent(Base):
-    """Una operación aplicada al ledger: la fuente de verdad, inmutable (ADR de AD2).
+    """Una operación auditada localmente, inmutable (ADR de AD2).
+
+    En v3 la fuente de verdad financiera es la wallet (ADR-0005).
 
     `idpk` es único: aplicar dos veces la misma operación es imposible a nivel de
     base de datos, sin depender de que el código consulte antes de insertar.
@@ -101,7 +103,7 @@ class CycleLedger(Base):
     reported_energy: Mapped[Decimal | None] = mapped_column(_Energy, nullable=True)
     report_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Cuándo se informó a New Relic el cierre del ciclo (evento CycleClosed, app/metrics.py).
-    # Lo agrega la migración 0002 en bases que ya existían.
+    # Lo agrega la migración 0003 en bases que ya existían.
     closure_recorded_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -140,10 +142,17 @@ class Negotiation(Base):
 
 
 class OutboxMessage(Base):
-    """Un mensaje por publicar a la central, que connector retira y envía.
+    """Un mensaje por publicar que connector retira y envía.
+
+    Puede destinarse a la central, al mercado o a otra ciudad.
 
     `dedupe_key` es único: dos réplicas de master que decidan lo mismo a la vez
-    (enviar el reporte de un ciclo, reintentar una propuesta) dejan una sola fila.
+    (enviar el reporte de un ciclo, reintentar una propuesta, publicar una oferta)
+    dejan una sola fila.
+
+    En la Hora 0 (Tarea A0) se define el contrato interno I1 con soporte para
+    destination ∈ {CENTRAL, MARKET_OFFER, CITY(code)}. Las columnas `exchange`
+    y `routing_key` se migran en la base de datos en la Tarea A4 (vía migraciones).
     """
 
     __tablename__ = "outbox"
@@ -190,6 +199,110 @@ class DistanceTable(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     idpk: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     distances: Mapped[dict] = mapped_column(JSONB, default=dict)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class WalletEvent(Base):
+    """
+    tabla para guardar todos los eventos de transacciones que llegan a la wallet.
+    se evitan los duplicados con el idpk del evento, que es único y se guarda como clave primaria.
+    data.idpk identifica la operación HTTP y NO es único entre eventos.
+    """
+
+    __tablename__ = "wallet_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idpk: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    cycle_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    swap_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    event_type: Mapped[str] = mapped_column(String(64))
+    operation_idpk: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class WalletBalance(Base):
+    """
+    aquí se guardan los saldos de la wallet, que son los oficiales y se usan para reconciliar
+    con el ledger local al final del ciclo.
+
+    se guardan los saldos de cada activo (kwh y creditos) de la ciudad que hace la lectura,
+    incluyendo available, held, credit_line, as_of y source.
+
+    esta es la tabla que se usa para GET/balance
+    """
+
+    __tablename__ = "wallet_balance"
+    asset: Mapped[str] = mapped_column(String(8), primary_key=True)
+    available: Mapped[Decimal] = mapped_column(Numeric(24, 2), default=Decimal(0))
+    held: Mapped[Decimal] = mapped_column(Numeric(24, 2), default=Decimal(0))
+    credit_line: Mapped[Decimal | None] = mapped_column(Numeric(24, 2), nullable=True)
+    as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source: Mapped[str] = mapped_column(String(32), default="event")
+    event_key: Mapped[str] = mapped_column(String(64), default="", server_default="")
+
+
+class WalletStatements(Base):
+    """
+    aquí se guardan todos los asientos de la wallet, que son los oficiales
+    y se usan para reconciliar con el ledger local al final del ciclo.
+
+    cuando consultamos GET/statement, el movimiento oficial se guarda en esta tabla
+    """
+
+    __tablename__ = "wallet_statements"
+    entry_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    cycle_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    asset: Mapped[str] = mapped_column(String(8))
+    kind: Mapped[str] = mapped_column(String(32))
+    amount: Mapped[Decimal] = mapped_column(Numeric(24, 2))
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class WalletReconciliacion(Base):
+    """
+    aquí se guarda el historial de comparaciones entre saldos locales y oficiales de la wallet,
+    sin modificar los asientos oficiales.
+    """
+
+    __tablename__ = "wallet_reconciliations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    local_before: Mapped[dict] = mapped_column(JSONB)
+    remote: Mapped[dict] = mapped_column(JSONB)
+    delta: Mapped[dict] = mapped_column(JSONB)
+    entries_imported: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class WalletSyncState(Base):
+    """Coordinación persistente entre réplicas del trabajo de reconciliación."""
+
+    __tablename__ = "wallet_sync_state"
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_cycle: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class CycleMarketMessage(Base):
+    """Copia de auditoría RF01, independiente de las tablas operacionales C/D."""
+
+    __tablename__ = "cycle_market_messages"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    idpk: Mapped[str] = mapped_column(String(64), unique=True)
+    cycle_id: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WalletSwapCycle(Base):
+    """Asociación explícita: los eventos wallet v3 no incluyen cycleId."""
+
+    __tablename__ = "wallet_swap_cycles"
+    swap_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    cycle_id: Mapped[str] = mapped_column(String(64), index=True)

@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +10,8 @@ class Settings(BaseSettings):
     """Valores que el servicio web necesita del entorno."""
 
     database_url: str
+    wallet_base_url: str | None = None
+    wallet_api_key: str | None = None
 
     # Código de la ciudad: va como cityId en todo mensaje que emitimos.
     city_code: str = "TAL"
@@ -33,6 +36,7 @@ class Settings(BaseSettings):
     # cuando está probado, sin tocar el ciclo de la E1 que ya funciona.
     market_enabled: bool = False
     wallet_enabled: bool = False
+    wallet_reconcile_interval_seconds: int = Field(default=180, gt=0)
 
     # El .env es compartido por los tres containers, así que las variables del
     # broker llegan acá aunque master no las use.

@@ -4,18 +4,16 @@
 Solo traduce entre HTTP y la capa de datos; ninguna query vive acá.
 """
 
-from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.cycle_repository import (
-    NegotiationNotAllowedError,
     budget_at_close,
     count_message_log,
-    create_negotiation,
     current_distance_table,
     get_cycle,
     get_cycle_report,
@@ -41,8 +39,10 @@ from app.cycle_schemas import (
     NegotiationOut,
 )
 from app.database import get_session
-from app.models import LedgerEvent
+from app.models import LedgerEvent, WalletBalance, WalletEvent, WalletStatements, WalletSyncState
 from app.schemas import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from app.wallet.history import cycle_energy, market_history, report_published_at, swap_states
+from app.wallet.reconciliacion import latest_reconciliation
 
 router = APIRouter(tags=["negotiations"])
 
@@ -50,31 +50,13 @@ SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
 
 
-@router.post("/negotiations", response_model=NegotiationOut, status_code=status.HTTP_201_CREATED)
+@router.post("/negotiations", status_code=status.HTTP_410_GONE)
 async def propose_negotiation(
     proposal: NegotiationIn, session: SessionDependency, settings: SettingsDependency
 ) -> NegotiationOut:
-    """Crea una propuesta para el ciclo abierto; se publica a la central en segundos.
-
-    Responde 409 con el motivo si no hay ventana abierta, si el precio supera el
-    tope o si un `give` excede la energía vendible.
-    """
-    try:
-        negotiation = await create_negotiation(
-            session,
-            proposal.direction,
-            proposal.quantity,
-            proposal.price_per_energy,
-            datetime.now(UTC),
-            settings,
-        )
-    except NegotiationNotAllowedError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"reason": error.reason, "message": str(error)},
-        ) from error
-
-    return NegotiationOut.model_validate(negotiation)
+    """El protocolo v3 retira la creación HTTP de negociaciones E1."""
+    # se debe responder con un error 410
+    raise HTTPException(status_code=410, detail="negotiation-proposal retirado en el protocolo v3")
 
 
 @router.get("/negotiations", response_model=list[NegotiationOut])
@@ -111,7 +93,17 @@ async def list_cycle_ledger(
 
     return CycleList(
         budget_balance=await total_budget(session),
-        items=[CycleOut.model_validate(cycle) for cycle in cycles],
+        items=[
+            CycleOut.model_validate(cycle).model_copy(
+                update={
+                    "report_sent_at": await report_published_at(session, cycle),
+                    "energy_balance": await cycle_energy(
+                        session, cycle.cycle_id, cycle.energy_balance
+                    ),
+                }
+            )
+            for cycle in cycles
+        ],
     )
 
 
@@ -130,6 +122,43 @@ async def read_cycle(cycle_id: str, session: SessionDependency) -> CycleDetail:
     operations = [_to_operation(event, cycle.last_operation_idpk) for event in events]
     negotiations = await list_cycle_negotiations(session, cycle_id)
 
+    wallet_events = (
+        (
+            await session.execute(
+                select(WalletEvent).where(WalletEvent.cycle_id == cycle_id).order_by(WalletEvent.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Incluir eventos wallet en la misma línea de operaciones auditables.
+    operations.extend(
+        LedgerEventOut(
+            idpk=e.idpk,
+            kind=e.event_type,
+            energy_delta=0,
+            budget_delta=0,
+            applied_at=e.received_at,
+            is_last=e.idpk == cycle.last_operation_idpk,
+            message=e.payload,
+        )
+        for e in wallet_events
+    )
+    operations.sort(key=lambda operation: operation.applied_at)
+
+    statement = (
+        (
+            await session.execute(
+                select(WalletStatements)
+                .where(WalletStatements.cycle_id == cycle_id)
+                .order_by(WalletStatements.entry_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     return CycleDetail(
         cycle_id=cycle.cycle_id,
         opened=cycle.opened,
@@ -143,13 +172,23 @@ async def read_cycle(cycle_id: str, session: SessionDependency) -> CycleDetail:
         ],
         negotiations=[NegotiationOut.model_validate(negotiation) for negotiation in negotiations],
         report=await get_cycle_report(session, cycle),
-        report_sent_at=cycle.report_sent_at,
+        report_sent_at=await report_published_at(session, cycle),
+        report_queued_at=cycle.report_sent_at,
         report_error=cycle.report_error,
         balances=CycleBalances(
-            energy=cycle.energy_balance, budget=await budget_at_close(session, cycle)
+            energy=await cycle_energy(session, cycle_id, cycle.energy_balance),
+            budget=await budget_at_close(session, cycle),
         ),
         last_operation_idpk=cycle.last_operation_idpk,
         operations=operations,
+        wallet_events=[event.payload for event in wallet_events],
+        wallet_statement=[asiento.payload for asiento in statement],
+        market_messages=await market_history(session, cycle_id),
+        swaps=swap_states([event.payload for event in wallet_events]),
+        distance_table=next(
+            (event.payload for event in reversed(events) if event.kind == "distance-table"), None
+        ),
+        reconciliation=await latest_reconciliation(session, cycle_id),
     )
 
 
@@ -224,3 +263,34 @@ def _number_or_none(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value)
+
+
+@router.get("/wallet/balance-status")
+async def wallet_balance_status(session: SessionDependency):
+    """
+    este endpoint entrega el ultimo balance oficial sincronizado y el delta detectado.
+    decision (AD5).
+    """
+
+    rows = (await session.execute(select(WalletBalance))).scalars().all()
+    sync = await session.get(WalletSyncState, "wallet")
+    return {
+        "synchronization": {
+            "attemptedAt": sync.attempted_at,
+            "completedCycle": sync.completed_cycle,
+            "error": sync.error,
+        }
+        if sync
+        else None,
+        "assets": {
+            r.asset: {
+                "available": str(r.available),
+                "held": str(r.held),
+                "creditLine": str(r.credit_line) if r.credit_line is not None else None,
+                "asOf": r.as_of,
+                "source": r.source,
+            }
+            for r in rows
+        },
+        "lastReconciliation": await latest_reconciliation(session),
+    }
