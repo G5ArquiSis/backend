@@ -322,7 +322,7 @@ def test_outbox_is_polled_even_when_no_messages_arrive(master_with, monkeypatch)
     clock = iter(range(0, 1000, 3))
     monkeypatch.setattr(consumer.time, "monotonic", lambda: next(clock))
     beats: list[int] = []
-    monkeypatch.setattr(consumer, "record_heartbeat", lambda: beats.append(1))
+    monkeypatch.setattr(consumer, "record_heartbeat", lambda consumer: beats.append(consumer))
     master = RecordingMaster({"/internal/outbox/claim": httpx.Response(200, json=[])})
     channel = ScriptedChannel([None, None, None, None])
 
@@ -331,7 +331,7 @@ def test_outbox_is_polled_even_when_no_messages_arrive(master_with, monkeypatch)
     polls = [path for path, _ in master.requests if path == "/internal/outbox/claim"]
     # El reloj avanza 3 s por vuelta: con el intervalo de 5 s toca consultar vuelta por medio.
     assert len(polls) == 2
-    assert len(beats) == 4
+    assert beats == ["ciudad"] * 4
     # La cola es de la central y la ciudad no tiene permiso de configuración: no se
     # declara, ni en modo pasivo (el broker respondería 403 y cerraría el canal).
     assert channel.declared == []
@@ -342,7 +342,7 @@ def test_outbox_is_polled_even_when_no_messages_arrive(master_with, monkeypatch)
 
 def test_messages_and_outbox_share_the_loop(master_with, monkeypatch) -> None:
     monkeypatch.setattr(consumer.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(consumer, "record_heartbeat", lambda: None)
+    monkeypatch.setattr(consumer, "record_heartbeat", lambda _consumer: None)
     report = {"idpk": "r-1", "msgId": "m-9", "type": "negotiation-report"}
     master = RecordingMaster(
         {"/internal/outbox/claim": httpx.Response(200, json=[{"id": 1, "payload": report}])}
@@ -384,7 +384,7 @@ def run_reconnections(monkeypatch, connection_seconds: float, attempts: int) -> 
     monkeypatch.setattr(consumer.pika, "BlockingConnection", lambda _parameters: connection())
     monkeypatch.setattr(consumer.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(consumer.time, "sleep", sleep)
-    monkeypatch.setattr(consumer, "record_heartbeat", lambda: None)
+    monkeypatch.setattr(consumer, "record_heartbeat", lambda _consumer: None)
 
     with pytest.raises(Stop):
         consumer.consume_forever("ciudad", "city.TAL", "x", SETTINGS, serve=serve)

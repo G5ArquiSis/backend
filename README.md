@@ -30,17 +30,46 @@ curl -i http://127.0.0.1:8001/health      # master-1 (master-2 en 8002)
 curl -i 'http://127.0.0.1:8001/history?page=1&limit=25'
 ```
 
+Para trabajar sin la central ni la wallet reales (broker y wallet locales, con fallas
+inyectables): `docker compose --profile fake up --build`, después de agregar
+`scripts/fake_wallet/env.fake` al final de `.env`. Detalles en
+[`scripts/fake_wallet/README.md`](scripts/fake_wallet/README.md).
+
 ## Tests y lint
 
 Usar Python 3.12 (asyncpg no compila en 3.14).
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r master/requirements.txt -r connector/requirements.txt pytest pytest-asyncio httpx ruff
+pip install -r master/requirements.txt -r connector/requirements.txt \
+  -r scripts/fake_wallet/requirements.txt pytest pytest-asyncio httpx ruff \
+  jsonschema rfc3339-validator
 pytest                      # los tests de integración se saltan si no hay Postgres
 TEST_DATABASE_URL=postgresql+asyncpg://energyshark:changeme@localhost:5432/energyshark_test pytest
 ruff check .
 ```
+
+### Contract tests (E4)
+
+`tests/test_contratos.py` valida cada mensaje que publican connector y master (ACK, NACK,
+`request`, `negotiation-report`...) contra los schemas del curso (v3.0.2) y los del grupo. Sin
+los clones se saltan; el CI los clona y falla si un mensaje no cumple:
+
+```bash
+git clone --depth 1 --branch v3.0.2 https://github.com/iic2173/energyshark-contracts.git /tmp/contratos-curso
+export ENERGYSHARK_CONTRACTS_DIR=/tmp/contratos-curso GROUP_CONTRACTS_DIR=../contratos
+pytest tests/test_contratos.py
+```
+
+Un tipo nuevo que el nodo publique (bid, offer...) necesita su schema en `contratos` (mergeado
+antes que el código) y pasar por `assert_publishable` en ese archivo. El CI además regenera el
+OpenAPI con `scripts/exportar_openapi.py` y falla si difiere de `contratos/openapi/openapi.yaml`.
+
+### Ensayos de anomalías (E7)
+
+`scripts/demo_anomalia_1.py` a `_7.py` provocan sobre el stack local (perfil `fake`) cada
+anomalía de la demo y comprueban lo que debe verse. Detalle y estado en
+[`scripts/ensayos/README.md`](scripts/ensayos/README.md).
 
 ## Documentación
 

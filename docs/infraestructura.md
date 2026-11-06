@@ -9,9 +9,12 @@ push a main ─→ GitHub Actions (.github/workflows/deploy.yml)
                  1. ruff + pytest (con un Postgres de servicio: los tests de integración corren)
                  2. build de energyshark-master y energyshark-connector ─→ push a ECR
                     (tags: <sha del commit> y latest)
-                 3. SSM ─→ EC2: copia deploy/docker-compose.prod.yml a /opt/energyshark,
+                 3. SSM ─→ EC2: copia el compose, la config de Nginx y deploy/remote-deploy.sh
+                                a /opt/energyshark y corre el script, que
+                                respalda la versión actual (release.env.prev),
                                 escribe MASTER_IMAGE y CONNECTOR_IMAGE en release.env,
                                 docker compose pull + up de a un servicio (ver abajo),
+                                si algo no queda healthy, vuelve a la versión anterior (§ Rollback),
                                 instala deploy/nginx/energyshark-tls.conf si cambió (nginx -t + reload)
 
 frontend ─→ API Gateway (api.melchort.me, CORS) ─┐
@@ -241,12 +244,71 @@ curl -i https://api.melchort.me/history     # 401, sin token
 curl -i https://api.melchort.me/history -H "Authorization: Bearer <token>"   # 200
 ```
 
+## Rollback
+
+**Automático.** `deploy/remote-deploy.sh` respalda la versión que está corriendo
+(`release.env.prev` y `docker-compose.prod.yml.prev`) antes de tocar nada. Si la nueva no queda
+`healthy` dentro del plazo, vuelve a levantar la anterior y el job de CI queda rojo con
+`ROLLBACK OK` en su salida: producción sigue sirviendo, pero el commit no está desplegado. Nginx
+sólo se actualiza después de un deploy exitoso. Los tests de `tests/test_remote_deploy.py` cubren
+ambos caminos.
+
+"Healthy" incluye a connector: su healthcheck exige señal de vida reciente de **cada** consumidor
+que debería estar corriendo (`observer`; `ciudad` con `CITY_BROKER_PASSWORD`; `mercado` con
+`MARKET_ENABLED=true`). Ver `connector/heartbeat.py`.
+
+**Manual, a un commit anterior.** GitHub → Actions → *CI / Deploy backend* → *Run workflow* en
+`main`, con `sha` = el SHA completo del commit al que se vuelve (por ejemplo, el último deploy
+verde). Se salta los tests y el build, comprueba que ECR todavía tenga sus imágenes (guarda las
+últimas 10) y despliega esas imágenes con el compose y la config de Nginx **de ese commit**. Después,
+`git revert` en `main` para que el próximo merge no vuelva a desplegar lo roto.
+
+**A mano en la EC2** (si GitHub o SSM no responden):
+
+```bash
+cd /opt/energyshark
+sudo cp release.env.prev release.env && sudo cp docker-compose.prod.yml.prev docker-compose.prod.yml
+sudo docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml \
+  up -d --remove-orphans --wait
+# El motivo de la falla está en los logs (no se copian a GitHub: pueden mostrar el .env):
+sudo docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml \
+  logs --tail 100 master-1 connector
+```
+
+## Memoria (t3.micro, ~950 MB + 1 GB de swap)
+
+Medido en New Relic (`ContainerSample` y `SystemSample`) del 2026-10-29 al 2026-11-05, con la E1
+en producción:
+
+| Proceso | Límite | Uso promedio | Máximo | Por qué ese límite |
+|---|---|---|---|---|
+| `postgres` | 256 MB | 8 MB | 81 MB | Base pequeña; `shared_buffers` por defecto (128 MB) |
+| `master-1`, `master-2` | 256 MB c/u | 65 MB | 74 MB | FastAPI + agente de New Relic + pool de asyncpg |
+| `connector` | 128 MB | 20 MB | 57 MB | Hasta tres conexiones pika (observer, ciudad, mercado) en hilos |
+| Host completo | ~950 MB | 651 MB | 750 MB | Contenedores + Docker, Nginx, SSM, agente de New Relic y servicios de Ubuntu |
+| Swap | 1 GB | ~450 MB | 514 MB | Estable, sin crecer: páginas inactivas del host, no paginación activa |
+
+Lectura: los contenedores usan menos de un tercio de su límite y no tuvieron reinicios. La
+presión viene del host: unos 450 MB son procesos fuera de Docker (incluidos servicios de Ubuntu
+que la EC2 no usa, como `fwupd`, `packagekit`, `ModemManager` y `udisks2`). Hay margen para lo que
+agrega la E2 (consumidor del mercado y llamadas a la wallet) sin tocar los límites.
+
+Los límites suman 896 MB y son topes, no reservas. Un contenedor que pasa su límite lo mata el OOM
+killer y `restart: always` lo levanta; eso se ve en New Relic como reinicio (`restartCount` en
+`ContainerSample`). Si pasa seguido, subir el límite de ese servicio y bajar otro, nunca sumar más
+que la RAM. Consulta para repetir la medición:
+
+```sql
+SELECT average(memoryUsageBytes)/1e6, max(memoryUsageBytes)/1e6, latest(restartCount)
+FROM ContainerSample FACET name SINCE 7 days ago
+```
+
 ## Operación
 
 | Tarea | Cómo |
 |---|---|
 | Desplegar | Merge a `main` |
-| Volver a una versión anterior | `git revert` + merge a `main`; en una emergencia, editar `release.env` en la EC2 con los tags anteriores y correr `up -d` |
+| Volver a una versión anterior | Ver § Rollback |
 | Ver logs | `sudo docker compose ... logs -f master-1 master-2` (o `connector`) en `/opt/energyshark` |
 | Agregar una variable de entorno | Documentarla en `.env.example` (PR) y agregarla a mano en `/opt/energyshark/.env` **antes** del merge |
 | Cambiar la config de Nginx | Editar `deploy/nginx/energyshark-tls.conf` (PR); el deploy la instala |

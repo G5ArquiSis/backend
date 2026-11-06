@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from app import metrics
 from app.wallet.schemas import BalanceResponse, LeaderboardResponse, StatementPage, SwapResponse
 
 
@@ -93,7 +94,8 @@ class WalletClient:
             self._shared_limiters[key] = (RateLimiter(60), RateLimiter(150))
         self._writes, self._reads = self._shared_limiters[key]
         self.max_attempts = max(1, max_attempts)
-        self.hook = hook
+        # Por defecto cada intento queda en New Relic como evento WalletCall (RNF05).
+        self.hook = hook if hook is not None else metrics.wallet_call_hook
 
     def configure_limits(self, *, walletWritesPerMinute=120, walletReadsPerMinute=300, **_):
         if walletWritesPerMinute < 2 or walletReadsPerMinute < 2:
