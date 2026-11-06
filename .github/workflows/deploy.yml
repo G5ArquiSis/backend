@@ -51,9 +51,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r master/requirements.txt -r connector/requirements.txt -r scripts/fake_wallet/requirements.txt pytest pytest-asyncio httpx ruff
+      - run: pip install -r master/requirements.txt -r connector/requirements.txt -r scripts/fake_wallet/requirements.txt pytest pytest-asyncio httpx ruff jsonschema rfc3339-validator
       - run: ruff check .
+      # Contract tests (E4, RDOC04): los mensajes que arman connector y master se validan
+      # contra los schemas del curso (fijos en v3.0.2) y contra los del grupo (main de
+      # contratos: un cambio de contrato se mergea allá antes que su código). Con
+      # CONTRACTS_REQUIRED=1 un clon faltante falla en vez de saltar los tests.
+      - name: Clonar contratos (curso v3.0.2 y G5ArquiSis/contratos)
+        run: |
+          git clone --quiet --depth 1 --branch v3.0.2 \
+            https://github.com/iic2173/energyshark-contracts.git "$RUNNER_TEMP/contratos-curso"
+          git clone --quiet --depth 1 \
+            https://github.com/G5ArquiSis/contratos.git "$RUNNER_TEMP/contratos-grupo"
+          git -C "$RUNNER_TEMP/contratos-grupo" log -1 --format='contratos del grupo en %h: %s'
+          {
+            echo "ENERGYSHARK_CONTRACTS_DIR=$RUNNER_TEMP/contratos-curso"
+            echo "GROUP_CONTRACTS_DIR=$RUNNER_TEMP/contratos-grupo"
+            echo "CONTRACTS_REQUIRED=1"
+          } >> "$GITHUB_ENV"
       - run: pytest
+      # El OpenAPI de contratos se genera desde la app; si alguien cambia un router o un DTO
+      # sin regenerarlo (o edita el YAML a mano), este paso falla con el diff.
+      - name: OpenAPI de contratos al día con la app
+        run: |
+          python scripts/exportar_openapi.py "$RUNNER_TEMP/openapi.yaml"
+          if ! diff -u "$RUNNER_TEMP/contratos-grupo/openapi/openapi.yaml" "$RUNNER_TEMP/openapi.yaml"; then
+            echo "::error::contratos/openapi/openapi.yaml no coincide con la app. Regenerarlo con 'python scripts/exportar_openapi.py ../contratos/openapi/openapi.yaml' y mergearlo en contratos primero."
+            exit 1
+          fi
+      - name: AGENTS.md referenciado desde el README
+        run: grep -q "G5ArquiSis/contratos/blob/main/AGENTS.md" README.md || { echo "::error::README.md debe enlazar contratos/AGENTS.md"; exit 1; }
       # La imagen de master arranca bajo el agente de New Relic: se prueba acá, con una key
       # falsa, para que un entrypoint roto falle en el PR y no en el deploy a producción.
       - name: Smoke test de la imagen de master
