@@ -65,6 +65,12 @@ Un tipo nuevo que el nodo publique (bid, offer...) necesita su schema en `contra
 antes que el código) y pasar por `assert_publishable` en ese archivo. El CI además regenera el
 OpenAPI con `scripts/exportar_openapi.py` y falla si difiere de `contratos/openapi/openapi.yaml`.
 
+### Ensayos de anomalías (E7)
+
+`scripts/demo_anomalia_1.py` a `_7.py` provocan sobre el stack local (perfil `fake`) cada
+anomalía de la demo y comprueban lo que debe verse. Detalle y estado en
+[`scripts/ensayos/README.md`](scripts/ensayos/README.md).
+
 ## Documentación
 
 Todo en [`docs/`](docs/): ADRs, spec de la entrega, milestones y declaración de uso de IA.

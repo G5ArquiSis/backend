@@ -21,6 +21,12 @@
       "tags": []
     },
     {
+      "name": "city.HGW",
+      "password_hash": "zV9LQ0DkfGcb7F22rN0orbdKnEA1CLbTFIqCcCb6yDui4E9q",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": []
+    },
+    {
       "name": "observer",
       "password_hash": "ATVen3aZ/b5NCgN5DHbjAYXfiA6XRnSwAUO7X14AbSmjEbcj",
       "hashing_algorithm": "rabbit_password_hashing_sha256",
@@ -53,6 +59,13 @@
       "configure": "^$",
       "write": "^(energy\\.x|market)$",
       "read": "^(city\\.TAL\\.q|market\\.TAL)$"
+    },
+    {
+      "user": "city.HGW",
+      "vhost": "energy",
+      "configure": "^$",
+      "write": "^(energy\\.x|market)$",
+      "read": "^(city\\.HGW\\.q|market\\.HGW)$"
     },
     {
       "user": "observer",
@@ -107,6 +120,20 @@
       "arguments": {}
     },
     {
+      "name": "market.HGW",
+      "vhost": "energy",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
+      "name": "city.HGW.q",
+      "vhost": "energy",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    },
+    {
       "name": "central.q",
       "vhost": "energy",
       "durable": true,
@@ -144,6 +171,38 @@
       "destination": "market.TAL",
       "destination_type": "queue",
       "routing_key": "market.offer.*",
+      "arguments": {}
+    },
+    {
+      "source": "energy.x",
+      "vhost": "energy",
+      "destination": "city.HGW.q",
+      "destination_type": "queue",
+      "routing_key": "city.HGW",
+      "arguments": {}
+    },
+    {
+      "source": "market",
+      "vhost": "energy",
+      "destination": "market.HGW",
+      "destination_type": "queue",
+      "routing_key": "market.offer.*",
+      "arguments": {}
+    },
+    {
+      "source": "market",
+      "vhost": "energy",
+      "destination": "market.TAL",
+      "destination_type": "queue",
+      "routing_key": "market.closed",
+      "arguments": {}
+    },
+    {
+      "source": "market",
+      "vhost": "energy",
+      "destination": "market.HGW",
+      "destination_type": "queue",
+      "routing_key": "market.closed",
       "arguments": {}
     }
   ]

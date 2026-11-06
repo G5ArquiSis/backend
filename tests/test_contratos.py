@@ -129,9 +129,7 @@ def _all_errors(errors):
 
 
 def _instance_path(error) -> str:
-    return "".join(
-        "/" + str(p).replace("~", "~0").replace("/", "~1") for p in error.absolute_path
-    )
+    return "".join("/" + str(p).replace("~", "~0").replace("/", "~1") for p in error.absolute_path)
 
 
 @pytest.mark.parametrize(("schema", "valid", "path"), _course_examples())
@@ -341,7 +339,9 @@ async def test_master_cycle_messages_follow_the_contract(db: AsyncSession) -> No
 async def test_master_does_not_publish_retired_proposals(db: AsyncSession) -> None:
     await apply_central_message(db, _status_statement(), WINDOW_START, SETTINGS)
     await apply_central_message(
-        db, _central("transfer", cycleId=CYCLE, data={"quantity": 1_000_000}), WINDOW_START,
+        db,
+        _central("transfer", cycleId=CYCLE, data={"quantity": 1_000_000}),
+        WINDOW_START,
         SETTINGS,
     )
     await create_negotiation(db, "take", Decimal("100"), None, WINDOW_START, SETTINGS)

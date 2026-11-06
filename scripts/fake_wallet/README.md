@@ -33,7 +33,8 @@ Esas credenciales sólo existen en el broker local, así que no son secretos.
 
 Colas del broker local: `city.TAL.q` (eventos para TAL), `market.TAL` (feed del mercado),
 `central.q` (todo lo que la ciudad publica a la central, para inspeccionarlo) y
-`observer.local.q`.
+`observer.local.q`. Para los ensayos (`scripts/ensayos/`) hay una segunda ciudad, HGW
+(usuario `city.HGW`, contraseña `local-hgw`), con sus colas `city.HGW.q` y `market.HGW`.
 
 ## Ciudades y saldos
 
@@ -51,7 +52,7 @@ curl -s -X POST $W/v1/swaps -H 'X-Api-Key: fake-key-tal' -H "Idempotency-Key: $(
 curl -s -X POST $W/v1/swaps/<swapId>/accept -H 'X-Api-Key: fake-key-hgw' -H "Idempotency-Key: $(uuidgen)"
 ```
 
-Los eventos para HGW y COR no tienen cola en el broker local: se ven en `GET /_fake/events`.
+Los eventos para HGW llegan a `city.HGW.q`; los de COR no tienen cola en el broker local. Todos se ven en `GET /_fake/events`.
 
 ## Qué imita
 
