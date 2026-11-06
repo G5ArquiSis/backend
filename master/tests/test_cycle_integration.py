@@ -57,7 +57,9 @@ async def db(database: None) -> AsyncIterator[AsyncSession]:
         await session.execute(
             text(
                 "TRUNCATE ledger_events, cycle_ledger, negotiations, outbox, message_log, "
-                "distance_tables RESTART IDENTITY"
+                "distance_tables, wallet_events, wallet_balance, wallet_statements, "
+                "wallet_reconciliations, wallet_sync_state, wallet_swap_cycles, "
+                "cycle_market_messages RESTART IDENTITY"
             )
         )
         await session.commit()
