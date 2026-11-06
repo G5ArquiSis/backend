@@ -90,7 +90,7 @@
 - **Herramienta y modo:** Antigravity, Gemini 3.8 Flash, agéntico.
 - **Tarea:** Definir los contratos formales en JSON Schema del protocolo v3 en el repositorio `contratos` (Tarea A5) e implementar el simulador de mercado con la ciudad fantasma MET en `backend` (Tarea A6) para habilitar las pruebas locales de los roles C y D y los tests de contrato en CI de E.
 - **Prompts relevantes:**
-  > "Vamos con el paso 2 del Rol A: necesitamos dejar listos todos los schemas JSON del protocolo v3 en contratos para destrabar al equipo con el CI, y armar el script del simulador de mercado local con la ciudad fantasma MET en backend para que C y D puedan hacer pruebas de compras y ventas sin esperar la red real."
+  > "Ahora vamos con el paso 2: necesitamos dejar listos todos los schemas JSON del protocolo v3 en contratos para destrabar al equipo con el CI y armar el script del simulador de mercado local con la ciudad fantasma MET en backend"
 - **Qué produjo la IA:**
   - `contratos/schemas/`:
     - 14 nuevos esquemas JSON: ofertas de mercado (`offer.schema.json`, `offer-updated.schema.json`, `offer-withdrawn.schema.json`, `market-closed.schema.json`), mensajes entre ciudades (`bid.schema.json`, `bid-accepted.schema.json`, `bid-rejected.schema.json`), liquidaciones centrales (`trade-recorded.schema.json`, `imbalance-settlement.schema.json`) y eventos asíncronos de wallet (`swap-proposed.schema.json`, `swap-settled.schema.json`, `swap-rejected.schema.json`, `swap-expired.schema.json`, `swap-cancelled.schema.json`).
