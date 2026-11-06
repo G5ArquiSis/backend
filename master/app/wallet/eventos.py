@@ -84,6 +84,16 @@ async def apply_wallet_event(session, message, now, settings):
     if inserted.scalar_one_or_none() is None:
         return DUPLICATE
 
+    if message["type"] == "swap-proposed":
+        from app.market.swaps import apply_swap_proposed
+
+        await apply_swap_proposed(
+            session,
+            message,
+            now,
+            settings,
+        )
+
     if message["type"] == "market-closed":
         if not cycle_id:
             raise ValueError("market-closed requiere cycleId")

@@ -14,7 +14,9 @@ from app.cycle_repository import APPLIED, DUPLICATE, apply_central_message
 from app.database import _session_factory
 from app.market.models import SellerBid, SellerOffer
 from app.market.seller import ACTIVE, withdraw_offer
-from app.models import OutboxMessage
+from app.market.swaps import reconcile_pending_swap_proposals
+from app.models import OutboxMessage, WalletEvent
+from app.wallet.correlation import register_swap_cycle
 
 pytestmark = pytest.mark.integration
 
@@ -335,3 +337,105 @@ async def test_two_concurrent_bids_cannot_reserve_the_same_remaining(db: AsyncSe
     offer = (await db.execute(select(SellerOffer))).scalar_one()
     await db.refresh(offer)
     assert offer.remaining == 200
+
+async def test_swap_proposed_arrives_before_http_response_is_reconciled(
+    db: AsyncSession,
+) -> None:
+    await open_offer(db)
+
+    assert await apply_central_message(
+        db,
+        bid_message(quantity=200),
+        NOW + timedelta(seconds=1),
+        SETTINGS,
+    ) == APPLIED
+
+    bid = (await db.execute(select(SellerBid))).scalar_one()
+    assert bid.status == "reserved"
+    assert bid.swap_id is None
+
+    swap_id = "swap-c4-race-001"
+    expires_at = NOW + timedelta(seconds=60)
+
+    # Simulamos que Wallet notifica el swap antes de que el worker
+    # haya recibido y persistido la respuesta HTTP.
+    wallet_event = {
+        "idpk": "wallet-event-race-001",
+        "msgId": "wallet-msg-race-001",
+        "sender": "central",
+        "type": "swap-proposed",
+        "timestamp": (
+            NOW + timedelta(seconds=2)
+        ).isoformat().replace("+00:00", "Z"),
+        "data": {
+            "swapId": swap_id,
+            "token": "token-race-001",
+            "expiresAt": expires_at.isoformat().replace("+00:00", "Z"),
+            # Intencionalmente no incluimos data.idpk.
+        },
+    }
+
+    assert await apply_central_message(
+        db,
+        wallet_event,
+        NOW + timedelta(seconds=2),
+        SETTINGS,
+    ) == APPLIED
+
+    await db.refresh(bid)
+
+    # El evento quedó registrado, pero todavía no pudo aceptar el bid.
+    assert bid.status == "reserved"
+    assert bid.swap_id is None
+
+    stored_event = (
+        await db.execute(
+            select(WalletEvent).where(
+                WalletEvent.idpk == "wallet-event-race-001"
+            )
+        )
+    ).scalar_one()
+
+    assert stored_event.swap_id == swap_id
+
+    # Simulamos que posteriormente llega la respuesta HTTP con swapId.
+    await register_swap_cycle(db, swap_id, bid.cycle_id)
+    bid.swap_id = swap_id
+    await db.commit()
+
+    # La reconciliación recupera el evento que había quedado pendiente.
+    processed = await reconcile_pending_swap_proposals(
+        db,
+        NOW + timedelta(seconds=3),
+        SETTINGS,
+    )
+    await db.commit()
+
+    await db.refresh(bid)
+
+    assert processed == 1
+    assert bid.status == "proposed"
+    assert bid.swap_id == swap_id
+
+    accepted = (
+        await db.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.dedupe_key
+                == "seller-bid:bid-corr-001:accepted"
+            )
+        )
+    ).scalar_one()
+
+    assert accepted.payload["type"] == "bid-accepted"
+    assert accepted.payload["data"]["swapId"] == swap_id
+    assert accepted.payload["data"]["swapToken"] == "token-race-001"
+
+    # Una segunda reconciliación no vuelve a procesar el bid.
+    processed_again = await reconcile_pending_swap_proposals(
+        db,
+        NOW + timedelta(seconds=4),
+        SETTINGS,
+    )
+    await db.commit()
+
+    assert processed_again == 0
