@@ -5,4 +5,4 @@ asyncpg>=0.30,<0.31
 pydantic>=2.9,<3.0
 pydantic-settings>=2.6,<3.0
 newrelic>=13.6,<14
-httpx>=0.27,<1.0 #para las peticiones http asincronas
+httpx>=0.27,<1.0 #para las peticiones http asincronaspyjwt[crypto]>=2.9,<3.0 # verificar el swapToken (ES256) antes de aceptar un swap
