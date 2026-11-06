@@ -75,7 +75,9 @@ jobs:
       - name: OpenAPI de contratos al día con la app
         run: |
           python scripts/exportar_openapi.py "$RUNNER_TEMP/openapi.yaml"
-          if ! diff -u "$RUNNER_TEMP/contratos-grupo/openapi/openapi.yaml" "$RUNNER_TEMP/openapi.yaml"; then
+          # fastapi y pydantic no están fijados, y según la versión el schema de un Decimal lleva
+          # o no un `pattern`. Esa diferencia no cambia el contrato: se ignoran esas líneas.
+          if ! diff -u -I '^ *pattern: ' "$RUNNER_TEMP/contratos-grupo/openapi/openapi.yaml" "$RUNNER_TEMP/openapi.yaml"; then
             echo "::error::contratos/openapi/openapi.yaml no coincide con la app. Regenerarlo con 'python scripts/exportar_openapi.py ../contratos/openapi/openapi.yaml' y mergearlo en contratos primero."
             exit 1
           fi
