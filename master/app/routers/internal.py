@@ -7,7 +7,7 @@ connector llega directo por la red de Docker.
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -50,7 +50,7 @@ async def receive_message(
 
 @router.post("/outbox/claim", response_model=list[OutboxItem])
 async def claim_pending_messages(
-    session: SessionDependency, settings: SettingsDependency
+    session: SessionDependency, settings: SettingsDependency, background_tasks: BackgroundTasks
 ) -> list[OutboxItem]:
     """Entrega los mensajes por publicar a la central.
 
@@ -58,6 +58,9 @@ async def claim_pending_messages(
     persistidos y encola lo que venció: el negotiation-report del ciclo y los
     reintentos de propuestas. Esa revisión es el reloj del sistema (ADR de AD3).
     """
+    from app.wallet.scheduler import reconcile_due
+
+    background_tasks.add_task(reconcile_due, settings)
     now = datetime.now(UTC)
     await run_due_work(session, now, settings)
     messages = await claim_outbox(session, now, settings)
@@ -69,8 +72,7 @@ async def claim_pending_messages(
 async def confirm_message_sent(message_id: int, session: SessionDependency) -> None:
     """connector confirma que publicó el mensaje; deja de ofrecerse."""
     if not await mark_outbox_sent(session, message_id, datetime.now(UTC)):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Mensaje no encontrado")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mensaje no encontrado")
 
 
 @router.post("/message-log", response_model=MessageLogEntry, status_code=status.HTTP_201_CREATED)
@@ -92,7 +94,7 @@ async def log_unapplied_message(
 @router.post("/wallet/reconcile")
 async def reconcile_wallet(session: SessionDependency, settings: SettingsDependency):
     """
-    este enpoint se debe invocar cada vez que se quiera reconciliar el estado de la 
+    este enpoint se debe invocar cada vez que se quiera reconciliar el estado de la
     wallet con el ledger local de la ciudad. No se invoca automaticamente desde conector.
     Es decision del rol E en su scheduler
     """
