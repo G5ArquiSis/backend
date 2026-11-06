@@ -17,8 +17,8 @@ columnas exchange y routing_key a la base de datos mediante migraciones.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Union
+from enum import StrEnum
+from typing import Any
 
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import OutboxMessage
 
 
-class DestinationType(str, Enum):
+class DestinationType(StrEnum):
     """Tipos de destino admitidos en el protocolo v3."""
 
     CENTRAL = "CENTRAL"
@@ -48,16 +48,14 @@ class Destination:
 
     @classmethod
     def market_offer(cls) -> Destination:
-        """Mensajes dirigidos al feed público del mercado (offer, offer-updated, offer-withdrawn)."""
+        """Mensajes dirigidos al feed público del mercado."""
         return cls(kind=DestinationType.MARKET_OFFER)
 
     @classmethod
     def city(cls, code: str) -> Destination:
         """Mensajes directos a otra ciudad (bid, bid-accepted, bid-rejected)."""
         clean_code = code.strip().upper()
-        if clean_code.startswith("CITY."):
-            clean_code = clean_code[5:]
-        elif clean_code.startswith("CITY:"):
+        if clean_code.startswith("CITY.") or clean_code.startswith("CITY:"):
             clean_code = clean_code[5:]
         if not clean_code:
             raise ValueError("El código de ciudad no puede estar vacío.")
@@ -92,7 +90,7 @@ CENTRAL = Destination.CENTRAL
 MARKET_OFFER = Destination.MARKET_OFFER
 CITY = Destination.city
 
-DestinationInput = Union[Destination, DestinationType, str, tuple[str, str]]
+DestinationInput = Destination | DestinationType | str | tuple[str, str]
 
 
 def parse_destination(destination: DestinationInput) -> Destination:

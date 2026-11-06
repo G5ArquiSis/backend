@@ -47,11 +47,7 @@ from app.models import (
     WalletBalance,  # para consultar los saldos oficiales que tiene la wallet
 )
 from app.outbox import (
-    CENTRAL,
-    CITY,
-    MARKET_OFFER,
     Destination,
-    DestinationType,
     enqueue_publish,
 )
 

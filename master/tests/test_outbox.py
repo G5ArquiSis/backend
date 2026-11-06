@@ -31,7 +31,7 @@ def test_destination_singletons_and_resolution() -> None:
 
 
 def test_destination_custom_city_code() -> None:
-    """Verifica que se pueda resolver la routing key del mercado para otra ciudad si fuera necesario."""
+    """Verifica que se pueda resolver la routing key del mercado para otra ciudad."""
     assert Destination.MARKET_OFFER.resolve(our_city_code="HGW") == ("market", "market.offer.HGW")
 
 
