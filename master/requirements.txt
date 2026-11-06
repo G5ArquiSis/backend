@@ -1,8 +1,11 @@
-fastapi>=0.115,<1.0
+# fastapi y pydantic van fijados: su versión cambia el OpenAPI generado (el CI lo compara con
+# el de contratos). Para subirlos, regenerar el OpenAPI y mergearlo en contratos en el mismo cambio.
+fastapi==0.162.0
 uvicorn[standard]>=0.32,<1.0
 sqlalchemy[asyncio]>=2.0,<2.1
 asyncpg>=0.30,<0.31
-pydantic>=2.9,<3.0
-pydantic-settings>=2.6,<3.0
+pydantic==2.14.3
+pydantic-settings==2.16.2
 newrelic>=13.6,<14
-httpx>=0.27,<1.0 #para las peticiones http asincronaspyjwt[crypto]>=2.9,<3.0 # verificar el swapToken (ES256) antes de aceptar un swap
+httpx>=0.27,<1.0 #para las peticiones http asincronas
+pyjwt[crypto]>=2.9,<3.0 # verificar el swapToken (ES256) antes de aceptar un swap

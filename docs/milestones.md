@@ -1,6 +1,6 @@
 # Plan de milestones
 
-> RDOC02. Actualizado el 2026-11-06. Las fechas de lo cumplido son las de su merge a `main` o de
+> RDOC02. Actualizado el 2026-11-06, después del deploy del PR #29. Las fechas de lo cumplido son las de su merge a `main` o de
 > su puesta en producción; las de lo pendiente y en revisión son la fecha objetivo. Las tareas de
 > la E2 siguen la numeración del reparto por roles (A0 a E7). Se actualiza en cada hito.
 
@@ -13,7 +13,7 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 
 | Tarea | Requisito | Fecha | Estado |
 |---|---|---|---|
-| E0: migraciones SQL numeradas, flags `MARKET_ENABLED`/`WALLET_ENABLED`, rutas nuevas protegidas en Nginx | Infra | 2026-11-06 | Cumplido en backend (PR #23); el registro de páginas y `api.js` del frontend están en revisión (frontend PR #8) |
+| E0: migraciones SQL numeradas, flags `MARKET_ENABLED`/`WALLET_ENABLED`, rutas nuevas protegidas en Nginx | Infra | 2026-11-06 | Cumplido (PR #23; frontend PR #8) |
 | A0: contrato I1, outbox con destino (`CENTRAL`, `MARKET_OFFER`, `CITY(code)`) | RF03 | 2026-11-06 | Cumplido (PR #24) |
 | B0: contrato I2, interfaz de `WalletClient` y registro de handlers | RF03 | 2026-11-05 | Cumplido (PR #21) |
 | C0: contrato I3, modelo de estrategia | AD6 | — | Pendiente |
@@ -29,7 +29,7 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 | A2: reglas de recepción de otras ciudades (`IDENTITY_MISMATCH`) y tipos retirados | G02, RF03 | — | En revisión (PR #28) |
 | A3: publicación al exchange `market`, a `city.{CODE}` y a la central, con límite de tasa | RF03 | — | En revisión (PR #28) |
 | A4: migración de la tabla outbox | RF03 | — | En revisión (PR #28) |
-| A5: schemas JSON de los mensajes E2 | RDOC04 | — | En revisión (contratos PR #5, backend PR #25) |
+| A5: schemas JSON de los mensajes E2 | RDOC04 | 2026-11-06 | Parcial: schemas en `contratos` (PR #5); lo del backend en revisión (PR #25) |
 | A6: simulador de mercado | Pruebas | — | En revisión (PR #25) |
 | A7: RF05 con los mensajes de la E2 | RF05 | — | Parcial: el registro de la E1 (`/message-log`) está en `main`; falta lo de otras ciudades |
 | B1: `WalletClient` real, idempotente y tolerante a 202, 429, 502 y 504 | RF03 | 2026-11-06 | Cumplido (PR #21, #27) |
@@ -40,10 +40,10 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 | B6: tests de idempotencia, desorden y reconciliación | RF05 | 2026-11-06 | Parcial: tests de la wallet en `main` (PR #27) |
 | C2 a C6: oferta propia, bids en serie (AD4), swap del vendedor, estrategia y RF04 | G04, RF04 | — | Pendiente |
 | D1 a D6: libro de ofertas, RF02, motor comprador, verificación del token, RF06 | G04, RF02, RF06 | — | Pendiente |
-| E1: wallet y broker simulados (`scripts/fake_wallet/`) | Pruebas | 2026-11-06 | En revisión (PR #29) |
-| E2: métricas de mercado y wallet en New Relic, dashboard y alertas | G08, RNF05 | 2026-11-06 | En revisión (PR #29). Las alertas se crean al desplegarlo |
-| E3: rollback del deploy y verificación de requisitos esenciales | G01, RNF04 | 2026-11-06 | En revisión (PR #29) |
-| E4: contract tests en CI y OpenAPI al día | RDOC04 | 2026-11-06 | En revisión (PR #29, contratos PR #6) |
+| E1: wallet y broker simulados (`scripts/fake_wallet/`) | Pruebas | 2026-11-06 | Cumplido (PR #29) |
+| E2: métricas de mercado y wallet en New Relic, dashboard y alertas | G08, RNF05 | 2026-11-06 | Cumplido (PR #29). Dashboard importado y seis alertas creadas en la política "EnergyShark E2", con aviso por email; la del feed del mercado queda desactivada hasta encender `MARKET_ENABLED` |
+| E3: rollback del deploy y verificación de requisitos esenciales | G01, RNF04 | 2026-11-06 | Cumplido (PR #29) |
+| E4: contract tests en CI y OpenAPI al día | RDOC04 | 2026-11-06 | Cumplido (PR #29, contratos PR #6). fastapi y pydantic quedan fijados para que el OpenAPI generado no cambie con la versión |
 
 ### M6 — Mercado en producción
 
@@ -51,16 +51,16 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 |---|---|---|---|
 | Hito H3: primer swap liquidado en producción | G04 | — | Pendiente (depende de C4 y D4) |
 | Encender `MARKET_ENABLED` y `WALLET_ENABLED` en la EC2 | G02, G03 | — | Pendiente |
-| Gates G01 a G09 con evidencia ([gates-e2.md](gates-e2.md)) | Gates | Antes de la demo | Parcial: G01, G05, G06, G07 y G09 comprobados |
+| Gates G01 a G09 con evidencia ([gates-e2.md](gates-e2.md)) | Gates | Antes de la demo | Parcial: G01, G05, G06, G07, G08 y G09 comprobados (2026-11-06) |
 | D7: correr el experimento de span y escribir el informe | RF06, RDOC05 | — | Pendiente |
 
 ### M7 — Calidad, documentación y demo
 
 | Tarea | Requisito | Fecha | Estado |
 |---|---|---|---|
-| E5: spec, milestones, tabla de AI logs, UML y docs del flujo v3 | RDOC02, RDOC03 | 2026-11-06 | En revisión (PR #29); se cierra con los PRs del mercado |
-| E6: escenario de punta a punta, ensayo de caída y guardián de ciclos | G03 | 2026-11-06 | En revisión (PR #29). El escenario pasa hasta el reporte; la parte del mercado espera a C y D |
-| E7: scripts de las anomalías 1 a 7 ([scripts/ensayos/README.md](../scripts/ensayos/README.md)) | Demo | 2026-11-06 | En revisión (PR #29). 5, 6 y 7 pasan; el resto espera a A2, C y D |
+| E5: spec, milestones, tabla de AI logs, UML y docs del flujo v3 | RDOC02, RDOC03 | 2026-11-06 | Cumplido (PR #29); se actualiza con los PRs del mercado |
+| E6: escenario de punta a punta, ensayo de caída y guardián de ciclos | G03 | 2026-11-06 | Cumplido (PR #29). El escenario pasa hasta el reporte; la parte del mercado espera a C y D |
+| E7: scripts de las anomalías 1 a 7 ([scripts/ensayos/README.md](../scripts/ensayos/README.md)) | Demo | 2026-11-06 | Cumplido (PR #29). 5, 6 y 7 pasan; el resto espera a A2, C y D |
 | Post-mortems de AD1 (A8), AD2 (B7) y AD3 (D8) | RDOC01 | Después de la demo | Pendiente |
 
 ## Entrega E1
