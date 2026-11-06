@@ -86,4 +86,23 @@
 - **Correcciones del integrante:** Ninguna requerida; implementación probada y verificada.
 - **Referencia:** Rama `feat/a0-outbox-destino`.
 
+## 2026-11-06 — Schemas JSON del protocolo v3 y Simulador de mercado (Tareas A5 y A6)
+- **Herramienta y modo:** Antigravity, Gemini 3.8 Flash, agéntico.
+- **Tarea:** Definir los contratos formales en JSON Schema del protocolo v3 en el repositorio `contratos` (Tarea A5) e implementar el simulador de mercado con la ciudad fantasma MET en `backend` (Tarea A6) para habilitar las pruebas locales de los roles C y D y los tests de contrato en CI de E.
+- **Prompts relevantes:**
+  > "Vamos con el paso 2 del Rol A: necesitamos dejar listos todos los schemas JSON del protocolo v3 en contratos para destrabar al equipo con el CI, y armar el script del simulador de mercado local con la ciudad fantasma MET en backend para que C y D puedan hacer pruebas de compras y ventas sin esperar la red real."
+- **Qué produjo la IA:**
+  - `contratos/schemas/`:
+    - 14 nuevos esquemas JSON: ofertas de mercado (`offer.schema.json`, `offer-updated.schema.json`, `offer-withdrawn.schema.json`, `market-closed.schema.json`), mensajes entre ciudades (`bid.schema.json`, `bid-accepted.schema.json`, `bid-rejected.schema.json`), liquidaciones centrales (`trade-recorded.schema.json`, `imbalance-settlement.schema.json`) y eventos asíncronos de wallet (`swap-proposed.schema.json`, `swap-settled.schema.json`, `swap-rejected.schema.json`, `swap-expired.schema.json`, `swap-cancelled.schema.json`).
+    - Actualización de esquemas extendidos v3: `envelope.schema.json` con todos los tipos válidos, `status-statement.schema.json` con bloque `market` y `sellable`, `transfer.schema.json` con `balanceAfter`/`creditLine`/`penalty`, y `distance-table.schema.json` con `disabledRouteTransportCost` y estado de enlaces `enabled`.
+    - Marcado de schemas retirados de E1 (`demand-statement`, `give-take`, `negotiation-proposal`) como deprecados/retirados con código 410 `TYPE_RETIRED`.
+    - Documentación completa en `contratos/schemas/README.md`.
+  - `contratos/AGENTS.md`: Incorporación de la sección "Protocolo v3: Mercado, Wallet y Reglas que no se rompen", especificando el intercambio de bids y ofertas, la verificación obligatoria de `user_id == city.{CODE}`, la validación de JWTs `swapToken` de la wallet y la ausencia de ACKs en el mercado público.
+  - `backend/scripts/simulador_mercado.py`: Script CLI ejecutable para inyección de eventos en master (`/internal/messages`) o RabbitMQ, con modos para feed de mercado, posturas directas, anomalías de identidad (`IDENTITY_MISMATCH`), mensajes malformados y la emulación de la ciudad fantasma MET con descenso periódico de precios.
+  - `backend/README.md`: Documentación de uso y ejemplos de comandos del simulador para el equipo.
+- **Verificación:** Validación sintáctica de todos los esquemas JSON (`ALL JSON SCHEMAS ARE VALID`), validación con `py_compile` de `simulador_mercado.py` y ejecución de prueba del simulador con `--help`.
+- **Correcciones del integrante:** Ninguna requerida; esquemas y simulador alineados con las referencias oficiales de la API v3.
+- **Referencia:** Rama `feat/a5-a6-schemas-simulador`.
+
+
 

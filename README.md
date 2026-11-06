@@ -42,6 +42,36 @@ TEST_DATABASE_URL=postgresql+asyncpg://energyshark:changeme@localhost:5432/energ
 ruff check .
 ```
 
+## Herramientas de prueba y simulación (E2)
+
+### Simulador de mercado y ciudad fantasma MET (Tarea A6)
+
+Permite probar el flujo de mercado sin depender de la red real ni de otras ciudades conectadas. Inyecta mensajes hacia `master` (`POST /internal/messages`) o directo a un broker:
+
+```bash
+# Inyectar ofertas de mercado de prueba (feed público)
+python3 scripts/simulador_mercado.py --mode feed
+
+# Inyectar bids hacia nuestra ciudad (TAL)
+python3 scripts/simulador_mercado.py --mode bids
+
+# Simular la conducta de la ciudad fantasma MET (vende a imbalancePrice * 0.9 bajando de precio)
+python3 scripts/simulador_mercado.py --mode ghost --iterations 5 --interval 5
+
+# Inyectar anomalías de prueba (identidad usurpada y mensajes malformados)
+python3 scripts/simulador_mercado.py --mode anomalies
+
+# Correr un escenario completo representativo
+python3 scripts/simulador_mercado.py --mode all
+```
+
+Parámetros útiles:
+- `--url`: URL de master local (por defecto `http://127.0.0.1:8000`).
+- `--broker-url`: URL de conexión AMQP si se desea publicar directo al broker.
+- `--cycle`: Identificador del ciclo simulado.
+- `--interval`: Segundos entre ticks de la ciudad fantasma (útil para acelerar tests).
+
+
 ## Documentación
 
 Todo en [`docs/`](docs/): ADRs, spec de la entrega, milestones y declaración de uso de IA.
