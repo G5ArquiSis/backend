@@ -39,13 +39,10 @@ class Settings(BaseSettings):
     wallet_reconcile_interval_seconds: int = Field(default=180, gt=0)
 
     # Comprador (rol D). Apagado por defecto: además necesita MARKET_ENABLED y
-    # WALLET_ENABLED. BUY_SPAN_SECONDS y BUY_SELECTION_POLICY son provisionales hasta que
-    # exista la estrategia del rol C (ver app/market/estrategia_compra.py).
+    # WALLET_ENABLED. El span y la política de selección no van acá: son de la estrategia
+    # del ciclo (app/market/strategy.py, rol C), que se cambia sin redeploy.
     buyer_enabled: bool = False
-    buy_span_seconds: int = Field(default=0, ge=0)
-    buy_selection_policy: str = "cheapest"
-    # Espera por bid-accepted/bid-rejected antes de reenviar el bid, y envíos totales.
-    bid_response_timeout_seconds: int = Field(default=30, gt=0)
+    # Envíos totales de un mismo bid (con el mismo idpk) antes de darlo por vencido.
     bid_max_attempts: int = Field(default=3, ge=1)
     # JWKS para verificar el swapToken; por defecto {raíz de la wallet}/.well-known/jwks.json.
     wallet_jwks_url: str | None = None

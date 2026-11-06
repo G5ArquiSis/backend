@@ -13,11 +13,14 @@ advisory lock de Postgres hace que solo una réplica compre a la vez.
 Reglas que sostiene:
 
 - Solo se compra si el precio efectivo es menor que `imbalancePrice` (si no, conviene pagar el
-  desbalance), entre `opensAt + span` y `lastBidAt`, y respetando `minBid`.
+  desbalance), entre `opensAt` y `lastBidAt`, y respetando `minBid` y el crédito.
+- El span y la política de selección vienen de la estrategia del ciclo (`get_active_strategy`,
+  rol C). El span es cuánto se espera la respuesta del vendedor antes de reenviar el bid; cada
+  bid guarda el span con que se envió, que es lo que mide el experimento de span (RF06).
 - Nunca el mismo kWh en dos bids: lo que está en bids vivos se descuenta del déficit, y hay a
   lo más un bid vivo por oferta.
-- Un bid sin respuesta se reenvía con el mismo idpk (y un msgId nuevo) hasta
-  `BID_MAX_ATTEMPTS` veces; después vence.
+- Un bid sin respuesta dentro del span se reenvía con el mismo idpk (y un msgId nuevo) hasta
+  `BID_MAX_ATTEMPTS` veces; después vence y sus kWh se piden a otra oferta.
 - Un swap se acepta solo si el token cumple (ver `token.py`), con una Idempotency-Key fija por
   bid: un reintento tras 502/504 o un reinicio a mitad de camino nunca acepta dos veces.
 
@@ -50,7 +53,6 @@ from app.market.book import (
     market_of,
     round2,
 )
-from app.market.estrategia_compra import buy_strategy
 from app.market.models import (
     BID_ACCEPTED,
     BID_EXPIRED,
@@ -67,6 +69,7 @@ from app.market.models import (
     MarketBid,
     MarketOffer,
 )
+from app.market.strategy import StrategyConfig, get_active_strategy
 from app.market.token import Expected, JwksCache, cache_for, jwks_url, verify_swap_token
 from app.models import WalletBalance
 from app.outbox import Destination, enqueue_publish
@@ -201,6 +204,21 @@ async def _after_swap_rejected(
     return APPLIED if failed.rowcount else IGNORED
 
 
+async def _after_swap_expired(
+    session: AsyncSession, message: dict, now: datetime, settings: Settings, outcome: str | None
+) -> str:
+    """El swap venció sin liquidarse: sus kWh vuelven a estar por comprar."""
+    swap_id = (message.get("data") or {}).get("swapId")
+    if not swap_id:
+        return IGNORED
+    expired = await session.execute(
+        update(MarketBid)
+        .where(MarketBid.swap_id == swap_id, MarketBid.state.in_((BID_PROPOSED, BID_ACCEPTED)))
+        .values(state=BID_FAILED, reason="SWAP_EXPIRED")
+    )
+    return APPLIED if expired.rowcount else IGNORED
+
+
 async def close_cycle_bids(session: AsyncSession, cycle_id: str) -> int:
     """Al cerrar el mercado vencen los bids que todavía esperaban respuesta."""
     expired = await session.execute(
@@ -217,6 +235,7 @@ def register() -> None:
     extend_handler("nack", _after_nack)
     extend_handler("swap-settled", _after_swap_settled)
     extend_handler("swap-rejected", _after_swap_rejected)
+    extend_handler("swap-expired", _after_swap_expired)
 
 
 # --- El tick del comprador -----------------------------------------------------------------
@@ -330,7 +349,7 @@ async def retry_or_expire_bids(session: AsyncSession, now: datetime, settings: S
             bid.state, bid.reason, bid.deadline_at = BID_EXPIRED, "NO_RESPONSE", None
             continue
         bid.attempts += 1
-        bid.deadline_at = now + timedelta(seconds=settings.bid_response_timeout_seconds)
+        bid.deadline_at = now + _response_wait(bid.span_seconds)
         await _publish_bid(session, bid, now, settings)
 
 
@@ -339,9 +358,7 @@ async def place_bids(session: AsyncSession, now: datetime, settings: Settings) -
     market = await current_market(session, now)
     if market is None or market.deficit <= 0:
         return []
-    strategy = buy_strategy(settings, market.cycle_id)
-    starts = market.opens_at + timedelta(seconds=strategy.span_seconds)
-    if now < starts or now >= market.last_bid_at - _LAST_BID_MARGIN:
+    if now >= market.last_bid_at - _LAST_BID_MARGIN:
         return []
 
     live = await session.execute(
@@ -364,8 +381,9 @@ async def place_bids(session: AsyncSession, now: datetime, settings: Settings) -
     busy_offers = {b.offer_id for b in live_bids}
     too_small = await _offers_rejected_as_too_small(session, market.cycle_id)
 
+    strategy = await get_active_strategy(market.cycle_id, session)
     placed = []
-    for entry in await list_open_offers(session, market.cycle_id):
+    for entry in _by_policy(await list_open_offers(session, market.cycle_id), strategy):
         if need <= 0 or len(placed) >= _MAX_NEW_BIDS_PER_TICK:
             break
         offer, price = entry.offer, entry.effective_price
@@ -391,8 +409,8 @@ async def place_bids(session: AsyncSession, now: datetime, settings: Settings) -
             state=BID_SENT,
             msg_ids=[],
             attempts=1,
-            deadline_at=now + timedelta(seconds=settings.bid_response_timeout_seconds),
-            span_seconds=strategy.span_seconds,
+            deadline_at=now + _response_wait(strategy.buy_wait_span_seconds),
+            span_seconds=strategy.buy_wait_span_seconds,
         )
         session.add(bid)
         await session.flush()
@@ -402,6 +420,20 @@ async def place_bids(session: AsyncSession, now: datetime, settings: Settings) -
         if budget is not None:
             budget -= quantity * price
     return placed
+
+
+def _by_policy(entries: list, strategy: StrategyConfig) -> list:
+    """Orden en que se recorren las ofertas. El libro ya viene por precio efectivo; con
+    `lowest_nominal_price` se reordena por precio publicado. En ambos casos solo se compra lo
+    que sale más barato que el desbalance, contando el transporte."""
+    if strategy.offer_selection_policy == "lowest_nominal_price":
+        return sorted(entries, key=lambda e: (e.offer.price_per_energy, e.offer.offer_id))
+    return entries
+
+
+def _response_wait(span_seconds: int | None) -> timedelta:
+    # Con span 0 se reenvía en el siguiente claim (cada 5 s), no en el mismo.
+    return timedelta(seconds=max(span_seconds or 0, 1))
 
 
 def _bid_quantity(need: Decimal, remaining: Decimal, price: Decimal, market: Market) -> Decimal:

@@ -33,6 +33,7 @@ from app.market.models import (
     MarketBid,
     MarketOffer,
 )
+from app.market.strategy import StrategyConfig
 from app.market.token import JwksCache, jwks_url
 from app.models import OutboxMessage, WalletBalance
 from app.wallet.client import WalletClient
@@ -50,8 +51,6 @@ SETTINGS = get_settings().model_copy(
         "buyer_enabled": True,
         "wallet_base_url": WALLET,
         "wallet_api_key": "clave-de-prueba",
-        "buy_span_seconds": 0,
-        "bid_response_timeout_seconds": 30,
         "bid_max_attempts": 3,
     }
 )
@@ -59,6 +58,18 @@ SETTINGS = get_settings().model_copy(
 PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
 OTHER_KEY = ec.generate_private_key(ec.SECP256R1())
 KID = "k1"
+
+
+@pytest.fixture(autouse=True)
+def strategy(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """La estrategia del ciclo (rol C): span de 30 s salvo que el test la cambie."""
+    current = {"config": StrategyConfig(buy_wait_span_seconds=30)}
+
+    async def active(cycle_id, session=None):
+        return current["config"]
+
+    monkeypatch.setattr(buyer, "get_active_strategy", active)
+    return current
 
 
 @pytest.fixture
@@ -323,13 +334,40 @@ async def test_bids_cover_the_deficit_with_the_cheapest_offers(db: AsyncSession)
     assert await buyer.place_bids(db, NOW + timedelta(seconds=5), SETTINGS) == []
 
 
-async def test_span_delays_the_first_bid(db: AsyncSession) -> None:
+async def test_bid_waits_the_strategy_span_before_resending(
+    db: AsyncSession, strategy: dict
+) -> None:
+    strategy["config"] = StrategyConfig(buy_wait_span_seconds=120)
     await setup_market(db, offer("HGW-1", "HGW", 9000, 300))
-    waiting = SETTINGS.model_copy(update={"buy_span_seconds": 120})
+    [bid] = await buyer.place_bids(db, NOW, SETTINGS)
+    await db.commit()
+    assert (bid.span_seconds, bid.deadline_at) == (120, NOW + timedelta(seconds=120))
 
-    assert await buyer.place_bids(db, OPENS + timedelta(seconds=60), waiting) == []
-    placed = await buyer.place_bids(db, OPENS + timedelta(seconds=120), waiting)
-    assert [b.span_seconds for b in placed] == [120]
+    await buyer.retry_or_expire_bids(db, NOW + timedelta(seconds=119), SETTINGS)
+    [bid] = await bids(db)
+    assert bid.attempts == 1
+    await buyer.retry_or_expire_bids(db, NOW + timedelta(seconds=120), SETTINGS)
+    [bid] = await bids(db)
+    assert bid.attempts == 2
+
+
+async def test_nominal_price_policy_still_respects_imbalance(
+    db: AsyncSession, strategy: dict
+) -> None:
+    strategy["config"] = StrategyConfig(offer_selection_policy="lowest_nominal_price")
+    await setup_market(
+        db,
+        offer("HGW-1", "HGW", 9000, 300),  # efectivo 350
+        offer("COR-1", "COR", 9000, 100),  # nominal más bajo; efectivo 500
+        offer("FAR-1", "COR", 9000, 99),  # nominal aún más bajo, pero efectivo 499
+    )
+    db.add(WalletBalance(asset="KWH", available=Decimal(6000), held=Decimal(0)))
+    await db.commit()
+
+    placed = await buyer.place_bids(db, NOW, SETTINGS)
+
+    # Falta 1001 kWh: los pide al nominal más barato aunque el efectivo no sea el menor.
+    assert [(b.offer_id, b.quantity) for b in placed] == [("FAR-1", 1001)]
 
 
 async def test_small_shortfall_buys_min_bid_only_if_cheaper_than_imbalance(
@@ -554,3 +592,58 @@ async def test_buyer_off_does_nothing(db: AsyncSession) -> None:
     await buyer.buyer_tick(off, now=NOW)
 
     assert await bids(db) == []
+
+
+async def test_swap_expired_frees_the_quantity(db: AsyncSession) -> None:
+    await placed_and_accepted(db)
+    expired = message("swap-expired", "expired-1", {"swapId": "swp-77"}, city=None)
+    del expired["cycleId"]
+
+    await apply(db, expired)
+
+    [bid] = await bids(db)
+    assert (bid.state, bid.reason) == ("failed", "SWAP_EXPIRED")
+    again = await buyer.place_bids(db, NOW + timedelta(seconds=40), SETTINGS)
+    assert [b.quantity for b in again] == [7001]
+
+
+# --- Experimento de span (D5) ------------------------------------------------------------
+
+
+async def test_span_experiment_per_cycle_and_by_span(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    # Déficit 7001: se liquidan 5000 a 300 + 50 de transporte y 2001 quedan en desbalance.
+    await setup_market(db, offer("HGW-1", "HGW", 5000, 300), offer("COR-1", "COR", 5000, 100))
+    first, second = await buyer.place_bids(db, NOW, SETTINGS)
+    await db.commit()
+    await apply(db, accepted(first))
+    settled = message("swap-settled", "settled-1", {"swapId": "swp-77"}, city=None)
+    del settled["cycleId"]
+    await apply(db, settled)
+    rejected = message(
+        "bid-rejected",
+        "rej-1",
+        {"target": second.msg_ids[0], "offerId": "COR-1", "requested": 2001},
+        city="COR",
+        reason="OFFER_WITHDRAWN",
+        code=410,
+    )
+    await apply(db, rejected)
+
+    response = await client.get("/experiments/span")
+
+    assert response.status_code == 200
+    body = response.json()
+    [cycle] = body["cycles"]
+    assert cycle["cycleId"] == CYCLE
+    assert cycle["spanSeconds"] == 30
+    assert (cycle["deficit"], cycle["covered"]) == ("7001", "5000")
+    assert cycle["marketCost"] == "1750000.00"  # 5000 × 350
+    assert cycle["imbalanceCost"] == "1470735.00"  # 2001 × 735
+    assert cycle["baselineCost"] == "5145735.00"  # 7001 × 735
+    assert cycle["savings"] == "1925000.00"
+    assert (cycle["bidsSent"], cycle["bidsRejected"]) == (2, 1)
+    [summary] = body["bySpan"]
+    assert summary["spanSeconds"] == 30 and summary["cycles"] == 1
+    assert summary["costVsBaseline"] == "0.6259"

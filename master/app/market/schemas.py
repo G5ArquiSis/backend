@@ -70,3 +70,40 @@ class BidOut(CamelCaseModel):
 
 class BidList(CamelCaseModel):
     items: list[BidOut]
+
+
+class SpanCycle(CamelCaseModel):
+    cycle_id: str
+    span_seconds: int | None
+    deficit: Decimal
+    covered: Decimal
+    # covered / deficit; None si el ciclo no tenía déficit.
+    coverage: Decimal | None
+    market_cost: Decimal
+    imbalance_cost: Decimal
+    effective_cost: Decimal
+    # Costo de no comprar nada: déficit × imbalancePrice.
+    baseline_cost: Decimal
+    savings: Decimal
+    bids_sent: int
+    bids_rejected: int
+
+
+class SpanAggregate(CamelCaseModel):
+    span_seconds: int | None
+    cycles: int
+    cycle_ids: list[str]
+    deficit: Decimal
+    covered: Decimal
+    coverage: Decimal | None
+    effective_cost: Decimal
+    baseline_cost: Decimal
+    # effective_cost / baseline_cost: bajo 1 es ahorro frente a no comprar.
+    cost_vs_baseline: Decimal | None
+    bids_sent: int
+    bids_rejected: int
+
+
+class SpanExperiment(CamelCaseModel):
+    cycles: list[SpanCycle]
+    by_span: list[SpanAggregate]
