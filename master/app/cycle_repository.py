@@ -996,6 +996,6 @@ def _number(value: Decimal) -> int | float:
 
 
 # Los handlers v3 se registran desde su propio módulo; no se edita el diccionario E1.
-from app.market import seller as _seller_handlers  # noqa: E402,F401
 from app.market import bids as _bid_handlers  # noqa: E402,F401
+from app.market import seller as _seller_handlers  # noqa: E402,F401
 from app.wallet import eventos as _wallet_handlers  # noqa: E402,F401
