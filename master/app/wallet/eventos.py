@@ -5,7 +5,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.cycle_repository import APPLIED, DUPLICATE, _ensure_cycle
 from app.handler_registry import register_handler
-from app.models import CycleLedger, WalletBalance, WalletEvent
+from app.models import CycleLedger, WalletEvent, WalletSwapCycle
 
 """
 aqui se procesan los eventos que llegan de la wallet, se registran en la base de datos local y
@@ -17,8 +17,16 @@ el estado del swap.
 
 """
 
-EVENTOS = {"swap-proposed", "swap-settled", "swap-rejected", "swap-expired",
-           "swap-cancelled", "trade-recorded", "imbalance-settlement", "market-closed"}
+EVENTOS = {
+    "swap-proposed",
+    "swap-settled",
+    "swap-rejected",
+    "swap-expired",
+    "swap-cancelled",
+    "trade-recorded",
+    "imbalance-settlement",
+    "market-closed",
+}
 
 
 def parse_timestamp(value):
@@ -37,10 +45,21 @@ def parse_timestamp(value):
 # funcion que recibe el evento de la wallet y lo registra en la base de datos local.
 # actualiza los saldos de las cuentas en el ledger local de la ciudad
 
+
 async def apply_wallet_event(session, message, now, settings):
 
     data = message.get("data") or {}
     cycle_id = message.get("cycleId")
+
+    swap_id = data.get("swapId")
+    if swap_id:
+        from app.wallet.correlation import register_swap_cycle
+
+        if cycle_id:
+            await register_swap_cycle(session, swap_id, cycle_id)
+        else:
+            link = await session.get(WalletSwapCycle, swap_id)
+            cycle_id = link.cycle_id if link else None
 
     if cycle_id:
         await _ensure_cycle(session, cycle_id, now)
@@ -49,11 +68,17 @@ async def apply_wallet_event(session, message, now, settings):
     # si el evento ya existe (idpk duplicado), no se hace nada y se retorna DUPLICATE.
 
     inserted = await session.execute(
-        pg_insert(WalletEvent).values(
-            idpk=message["idpk"], cycle_id=cycle_id,
-            swap_id=data.get("swapId"), event_type=message["type"],
-            operation_idpk=data.get("idpk"), payload=message,
-        ).on_conflict_do_nothing(index_elements=["idpk"]).returning(WalletEvent.id)
+        pg_insert(WalletEvent)
+        .values(
+            idpk=message["idpk"],
+            cycle_id=cycle_id,
+            swap_id=data.get("swapId"),
+            event_type=message["type"],
+            operation_idpk=data.get("idpk"),
+            payload=message,
+        )
+        .on_conflict_do_nothing(index_elements=["idpk"])
+        .returning(WalletEvent.id)
     )
     if inserted.scalar_one_or_none() is None:
         return DUPLICATE
@@ -69,29 +94,31 @@ async def apply_wallet_event(session, message, now, settings):
 
     balances = data.get("balancesAfter")
 
+    if message["type"] == "imbalance-settlement":
+        from app.models import WalletBalance
+        from app.wallet.balances import lock_balances
+
+        await lock_balances(session)
+        row = await session.get(WalletBalance, "CR", populate_existing=True)
+        balances = {
+            "CR": {"available": data["balanceAfter"], "held": row.held if row is not None else 0},
+            "KWH": {"available": 0, "held": 0},
+        }
+
     if isinstance(balances, dict):
-        as_of = parse_timestamp(message["timestamp"])
-        for activo, values in balances.items():
+        from app.wallet.balances import update_balances
 
-            if activo not in ("CR", "KWH") or not isinstance(values, dict):
-                continue
+        await update_balances(
+            session, balances, parse_timestamp(message["timestamp"]), "event", message["idpk"]
+        )
 
-            row = await session.get(WalletBalance, activo, with_for_update=True)
-
-            if row is None:
-                row = WalletBalance(
-                    asset=activo, available=Decimal(0), held=Decimal(0))
-                session.add(row)
-
-            if row.as_of is None or as_of > row.as_of:
-                row.available = Decimal(str(values["available"]))
-                row.held = Decimal(str(values["held"]))
-                row.as_of = as_of
-                row.source = "event"
+    if cycle_id and message["type"] == "imbalance-settlement":
+        cycle.energy_balance = Decimal(0)
 
     # No registrar movimientos financieros especulativos: trade-recorded es
     # notificación, los asientos oficiales vienen en /statement.
     return APPLIED
+
 
 for name in EVENTOS:
     register_handler(name, apply_wallet_event)

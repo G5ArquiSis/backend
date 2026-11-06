@@ -48,7 +48,10 @@ class Destination:
 
     @classmethod
     def market_offer(cls) -> Destination:
-        """Mensajes dirigidos al feed público del mercado."""
+        """Mensajes dirigidos al feed público del mercado.
+
+        Incluye: offer, offer-updated y offer-withdrawn.
+        """
         return cls(kind=DestinationType.MARKET_OFFER)
 
     @classmethod

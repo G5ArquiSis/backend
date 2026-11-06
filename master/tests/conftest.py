@@ -21,7 +21,7 @@ from fastapi import FastAPI  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from app.database import _session_factory, create_schema  # noqa: E402
+from app.database import _session_factory, create_schema, engine  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 
 
@@ -52,6 +52,9 @@ async def database() -> None:
     """
     try:
         await create_schema()
+        from app.migrations import run_migrations
+
+        await run_migrations(engine)
     except Exception as error:  # noqa: BLE001 - cualquier fallo de conexión sirve para saltar
         pytest.skip(f"sin Postgres alcanzable: {error}")
 
