@@ -1,28 +1,44 @@
-# Ciclo de negociación: ledger, reporte y negociaciones
+# Ciclo de negociación: ledger, wallet y reporte
 
-Cómo `master` lleva el ledger, envía el `negotiation-report`, maneja las negociaciones
-voluntarias y registra lo que no se aplicó, y qué necesita de `connector` para que todo corra. Las decisiones están en los ADRs
-de [AD2](adr/0002-persistencia-ledger.md) y [AD3](adr/0003-timeouts-negociacion.md).
+Cómo `master` lleva el ledger, aplica los eventos de la wallet de la central, se concilia con
+ella y envía el `negotiation-report`, y qué necesita de `connector` para que todo corra. Las
+decisiones están en los ADRs de [AD2](adr/0002-persistencia-ledger.md),
+[AD3](adr/0003-timeouts-negociacion.md) y [AD5](adr/0005-consistencia-wallet-ledger.md).
+Actualizado el 2026-11-06 para el protocolo v3; describe lo que está en `main`.
+
+## Qué cambió en la E2
+
+- **La central ya no negocia.** Opera la wallet (`CR` y `KWH`) y liquida al cierre. El flujo de
+  la E1 con ella (`negotiation-proposal`, `give`, `take`, `demand-statement`) está retirado:
+  `master` ya no aplica esos tipos y `POST /negotiations` responde 410.
+- **Los saldos los manda la wallet.** Sus resultados llegan como eventos a `city.TAL`
+  (`swap-*`, `trade-recorded`, `imbalance-settlement`, `market-closed`) y `master` los aplica
+  una sola vez por `idpk`. Además, se concilia contra `GET /balance` (AD5).
+- **El mercado es entre ciudades.** Ofertas en el exchange `market`, bids a `city.{vendedor}` y
+  swaps en la wallet. La outbox ya guarda el destino de cada mensaje (contrato I1, PR #24); el
+  consumo de `market.TAL`, la publicación a esos destinos (PR #28) y la estrategia de compra y
+  venta (roles C y D) todavía no están en `main`.
 
 ## Reparto de responsabilidades
 
 ```
-central ──► city.TAL.q ─► connector ──POST /internal/messages──► master ──► Postgres
-                             ▲                                     │
-                             └────── POST /internal/outbox/claim ──┘
-central ◄── publica ─────────┘
+central, wallet y ciudades ──► city.TAL.q ─► connector ──POST /internal/messages──► master ──► Postgres
+                                                ▲                                   │  │
+                                                └────── POST /internal/outbox/claim ┘  │
+central ◄── publica ────────────────────────────┘                                      │
+wallet de la central ◄── HTTPS (X-Api-Key) ────────────────────────────────────────────┘
 ```
 
 - **`connector` transporta.** Recibe de la central, valida el envelope, responde ACK o NACK,
   reenvía el mensaje a `master` y publica lo que `master` le entrega. Atiende dos colas, cada
   una con su conexión: la de la ciudad (`city.TAL.q`, protocolo de la E1) y la del observer
   (`demand-set` de la E0, que sigue alimentando `/history`).
-- **`master` decide y persiste.** Aplica los mensajes al ledger, lleva el estado de cada
-  negociación y resuelve qué hay que enviar y cuándo.
+- **`master` decide y persiste.** Aplica los mensajes y los eventos de la wallet al ledger,
+  llama a la wallet y resuelve qué hay que enviar y cuándo. `connector` nunca llama a la wallet.
 
 `master` no tiene temporizadores. Cada vez que `connector` consulta la outbox, `master` revisa en
-la base de datos los plazos vencidos y encola lo que corresponda. Por eso un reinicio no pierde
-el reporte de un ciclo ni una negociación en curso.
+la base de datos los plazos vencidos, encola lo que corresponda y, si toca, se concilia con la
+wallet. Por eso un reinicio no pierde el reporte de un ciclo.
 
 ## Qué confirma `connector` al broker
 
@@ -42,7 +58,7 @@ solos a la cola.
 
 Son cuatro llamadas HTTP a `master`, por la red de Docker (`http://master:8000`).
 
-### 1. Reenviar cada mensaje válido de la central
+### 1. Reenviar cada mensaje válido
 
 ```
 POST /internal/messages
@@ -59,7 +75,8 @@ Content-Type: application/json
 | 422 | Le falta un campo que su tipo exige | Responder NACK a la central |
 | 5xx o sin respuesta | `master` no está disponible | Reencolar y reintentar; no confirmar |
 
-Se reenvían todos los tipos: `master` descarta los que no usa. El ACK del protocolo a la central
+Se reenvían todos los tipos, vengan de la central, de la wallet o de otra ciudad: `master`
+descarta los que no usa. El ACK del protocolo a la central
 lo sigue enviando `connector`; este endpoint no lo reemplaza.
 
 ### 2. Retirar los mensajes por publicar
@@ -74,9 +91,15 @@ Responde una lista, vacía si no hay nada:
 [{ "id": 12, "payload": { "idpk": "...", "msgId": "...", "type": "negotiation-report", "...": "..." } }]
 ```
 
-`payload` es el mensaje completo, listo para publicar a la central con `user_id = city.TAL`. Hay
-que llamarlo **cada 5 segundos**, haya o no mensajes entrantes: es el reloj del sistema. Si deja
-de llamarse, no sale el reporte ni vencen los timeouts.
+`payload` es el mensaje completo, listo para publicar con `user_id = city.TAL`. Hoy `connector`
+lo publica todo a la central (`energy.x`, routing key `central`); la outbox ya guarda el
+exchange y la routing key de cada mensaje, y publicarlos a su destino es parte del PR #28.
+
+Hay que llamarlo **cada 5 segundos**, haya o no mensajes entrantes: es el reloj del sistema. Si
+deja de llamarse, no sale el reporte, no se piden los status-statement que falten y no se
+concilia con la wallet. Cada llamada lanza la reconciliación en segundo plano: corre cada
+`WALLET_RECONCILE_INTERVAL_SECONDS` y una vez más al vencer el plazo del reporte de un ciclo.
+Un advisory lock de Postgres evita que las dos réplicas llamen a la wallet a la vez.
 
 ### 3. Confirmar cada publicación
 
@@ -103,16 +126,20 @@ duplicados no se informan por acá: los registra `master` al detectarlos.
 
 ## Qué hace `master` con cada mensaje
 
-| Tipo | Efecto |
-|---|---|
-| `status-statement` | Abre el ciclo, fija el balance de energía (`generationCapacity - consumption`) y programa el reporte |
-| `transfer` sin `becauseOf` | Suma `quantity` al presupuesto |
-| `demand-statement` | Suma `quantity` a la energía y resta `quantity × valuePerKwh` del presupuesto |
-| `take` | Confirma nuestra compra, la aplica al ledger y encola nuestro `transfer` de pago |
-| `give` | Confirma nuestra venta y abre el plazo de 30 segundos para recibir el pago |
-| `transfer` con `becauseOf` | Pago de una venta: recién acá se aplica al ledger |
-| `error`, `nack` | Rechaza la propuesta, o reprograma el reporte si es `REPORT_TOO_EARLY` |
-| `distance-table` | Guarda la tabla; la vigente es la última recibida |
+| Tipo | Origen | Efecto |
+|---|---|---|
+| `status-statement` | Central | Abre el ciclo, fija el balance de energía (`generationCapacity - consumption`) y programa el reporte para `market.reportOpensAt` más 15 s. Los límites de `market.limits` ajustan el cliente de la wallet |
+| `transfer` | Central | Suma `quantity` al presupuesto |
+| `distance-table` | Central | Guarda la tabla; la vigente es la última recibida. Cada ruta trae `enabled` |
+| `swap-proposed`, `swap-settled`, `swap-rejected`, `swap-expired`, `swap-cancelled` | Wallet | Registra el evento una vez por `idpk`, liga el `swapId` a su ciclo y actualiza los saldos locales con los que trae el evento |
+| `trade-recorded` | Wallet | Notificación del trato. No crea asientos: los oficiales vienen en `GET /statement` |
+| `imbalance-settlement` | Wallet | Liquidación del desbalance al cierre: deja en cero la energía del ciclo |
+| `market-closed` | Wallet | Se registra como evento del ciclo |
+| `offer`, `bid`, `bid-accepted`, `bid-rejected`, ... | Otras ciudades | Se guardan en el historial del ciclo (`cycle_market_messages`). Decidir qué hacer con ellos es de la estrategia (roles C y D) |
+| `error`, `nack` | Central | Reprograma el reporte si es `REPORT_TOO_EARLY`; si no, guarda el motivo |
+
+Los eventos de la wallet pueden llegar en cualquier orden y repetidos: cada uno se aplica una
+sola vez, y un evento viejo no pisa un saldo más nuevo.
 
 El presupuesto se traspasa entre ciclos: el `budgetBalance` que se reporta es la suma de todos
 los eventos. La energía es por ciclo.
@@ -120,11 +147,24 @@ los eventos. La energía es por ciclo.
 ## El `negotiation-report`
 
 - Se programa al recibir el `status-statement`, para 15 segundos después de que abre el periodo
-  de cierre (`validUntil` menos 5 minutos).
+  de cierre: `market.reportOpensAt` en el protocolo v3, o `validUntil` menos 5 minutos si el
+  mensaje no lo trae.
 - Solo se envía por ciclos que la central abrió, y nunca después de `validUntil`.
 - Ante `REPORT_TOO_EARLY` se reenvía en `data.opensAt`, con el mismo `idpk`.
 - Si el ledger cambia después de reportar y la ventana sigue abierta, se envía una corrección
   con un `idpk` nuevo.
+
+## Reconciliación con la wallet (AD5)
+
+La wallet es la fuente de verdad. `master` le pide `GET /balance` y `GET /statement`, guarda los
+saldos oficiales (`wallet_balances`) y los movimientos, y calcula la diferencia con su ledger
+(wallet menos local) por activo. El resultado se ve en `GET /wallet/balance-status`, junto con
+el estado de la última sincronización (`attemptedAt`, `completedCycle`, `error`). Si la wallet
+no responde, se guarda el tipo de error y se reintenta en el siguiente intervalo, no en cada
+llamada a la outbox.
+
+`POST /internal/wallet/reconcile` fuerza una reconciliación. Es interno (Nginx bloquea
+`/internal/`) y sirve para probar en local.
 
 ## Peticiones directas
 
@@ -151,9 +191,9 @@ Entran por `https://api.melchort.me`, con el token de Auth0. Por `https://melcho
 | `GET /cycles/{cycleId}` | Historial de un ciclo: `statusStatement`, `transfers`, `demandStatements`, `negotiations`, `report` y `balances`. `operations` trae todo en orden, y la última lleva `isLast: true` (RF01) |
 | `GET /connectivity` | La `distance-table` vigente: destino, distancia, `transportCost` y `enabled` (RF02) |
 | `GET /message-log` | Duplicados, descartados y NACK, paginados; filtra con `?category=duplicate\|discarded\|nack` (RF05) |
-| `POST /negotiations` | Crea una propuesta: `{"direction": "give" \| "take", "quantity": 300, "pricePerEnergy": 220.5}`. Sin precio, oferta el tope del ciclo. Responde 409 con el motivo si no hay ventana abierta, si el precio supera el tope o si un `give` excede la energía vendible |
-| `GET /negotiations` | Historial con estado: `pending`, `confirmed`, `paid`, `expired` o `rejected` |
-| `GET /negotiations/{id}` | Detalle, con el número de intentos y el motivo de rechazo |
+| `GET /wallet/balance-status` | Saldos oficiales de la wallet, su diferencia con el ledger y el estado de la última reconciliación (AD5) |
+| `POST /negotiations` | Retirado en el protocolo v3: siempre responde 410 |
+| `GET /negotiations`, `GET /negotiations/{id}` | Historial de las negociaciones de la E1, de solo lectura |
 
 ## Configuración
 
@@ -163,7 +203,13 @@ Variables de `master`, documentadas en [`.env.example`](../.env.example): `CITY_
 `STATEMENT_REQUEST_INTERVAL_SECONDS` y `STATEMENT_REQUEST_MAX_ATTEMPTS`. Todas tienen un valor
 por defecto.
 
-`scripts/demo_anomalia_1.py` ensaya la anomalía 1 (duplicado) contra el stack local.
+Las de la E2: `MARKET_ENABLED` y `WALLET_ENABLED` (flags, apagados por defecto),
+`WALLET_BASE_URL`, `WALLET_API_KEY` (secreto, nunca al repo) y
+`WALLET_RECONCILE_INTERVAL_SECONDS`.
+
+Los ensayos de las anomalías de la demo y el escenario de punta a punta están en
+[`scripts/ensayos/README.md`](../scripts/ensayos/README.md); corren contra el stack local con la
+wallet y el broker falsos.
 
 ## Probarlo sin la central
 
@@ -192,8 +238,11 @@ Los entrega el curso junto con la contraseña. Tres nombres se parecen y no son 
 |---|---|---|
 | Usuario | `city.TAL` | Autenticación y propiedad `user_id` de lo que publicamos |
 | Cola | `city.TAL.q` | Lo que consumimos; el usuario no tiene permisos sobre otro nombre |
-| Exchange | `energy.x` | A donde publicamos |
-| Routing key de la central | `central` | Con la que publicamos |
+| Exchange | `energy.x` | A donde publicamos a la central y a otras ciudades |
+| Routing key de la central | `central` | Con la que publicamos a la central |
+| Routing key de otra ciudad | `city.{CODE}` | Bids y respuestas a esa ciudad (E2) |
+| Cola del mercado | `market.TAL` | Feed de ofertas (E2, con `MARKET_ENABLED`) |
+| Exchange del mercado | `market`, routing key `market.offer.TAL` | Nuestras ofertas (E2) |
 | Virtual host | `energy` | El mismo del observer |
 
 La cola no se declara, ni en modo pasivo: el usuario de la ciudad no tiene permiso de
@@ -216,7 +265,9 @@ sudo docker logs -f energyshark-e1-connector-1     # debe decir "Escuchando la c
 
 ## Lo que no cubre
 
-- La interfaz todavía no consume estos endpoints: las vistas del frontend usan datos de ejemplo.
-- Los endpoints no están en el OpenAPI del repo `contratos`.
+- El consumo de `market.TAL`, la verificación de identidad de otras ciudades
+  (`IDENTITY_MISMATCH`) y la publicación a destinos distintos de la central: PR #28 (rol A).
+- La oferta propia, la atención de bids, la compra y la verificación del token del swap: roles C
+  y D. Cuando entren, este documento se actualiza con su flujo.
 - El nombre de la tabla de RF05 es `message_log`, con una columna de categoría. El ADR de AD2 la
   llamaba `duplicate_messages`; se generalizó para guardar también descartados y NACK.
