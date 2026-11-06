@@ -162,10 +162,6 @@ class OutboxMessage(Base):
     `dedupe_key` es único: dos réplicas de master que decidan lo mismo a la vez
     (enviar el reporte de un ciclo, reintentar una propuesta, publicar una oferta)
     dejan una sola fila.
-
-    En la Hora 0 (Tarea A0) se define el contrato interno I1 con soporte para
-    destination ∈ {CENTRAL, MARKET_OFFER, CITY(code)}. Las columnas `exchange`
-    y `routing_key` se migran en la base de datos en la Tarea A4 (vía migraciones).
     """
 
     __tablename__ = "outbox"
@@ -180,6 +176,10 @@ class OutboxMessage(Base):
         DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now())
+    exchange: Mapped[str] = mapped_column(
+        String(64), default="energy.x", server_default="energy.x")
+    routing_key: Mapped[str] = mapped_column(
+        String(128), default="central", server_default="central")
 
 
 class MessageLog(Base):

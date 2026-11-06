@@ -62,7 +62,15 @@ async def claim_pending_messages(
     await run_due_work(session, now, settings)
     messages = await claim_outbox(session, now, settings)
 
-    return [OutboxItem(id=message.id, payload=message.payload) for message in messages]
+    return [
+        OutboxItem(
+            id=message.id,
+            payload=message.payload,
+            exchange=getattr(message, "exchange", "energy.x") or "energy.x",
+            routing_key=getattr(message, "routing_key", "central") or "central",
+        )
+        for message in messages
+    ]
 
 
 @router.post("/outbox/{message_id}/sent", status_code=status.HTTP_204_NO_CONTENT)
