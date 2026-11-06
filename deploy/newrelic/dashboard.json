@@ -46,7 +46,7 @@
           },
           "linkedEntityGuids": null,
           "visualization": {
-            "id": "viz.stacked_bar"
+            "id": "viz.stacked-bar"
           },
           "rawConfiguration": {
             "nrqlQueries": [
