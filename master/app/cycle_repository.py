@@ -46,14 +46,7 @@ from app.models import (
     OutboxMessage,
     WalletBalance,  # para consultar los saldos oficiales que tiene la wallet
 )
-from app.outbox import (
-    CENTRAL,
-    CITY,
-    MARKET_OFFER,
-    Destination,
-    DestinationType,
-    enqueue_publish,
-)
+from app.outbox import Destination, enqueue_publish
 
 PENDING = "pending"
 CONFIRMED = "confirmed"

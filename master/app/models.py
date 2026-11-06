@@ -157,7 +157,9 @@ class Negotiation(Base):
 
 
 class OutboxMessage(Base):
-    """Un mensaje por publicar a la central, al mercado o a otra ciudad, que connector retira y envía.
+    """Un mensaje por publicar que connector retira y envía.
+
+    Puede destinarse a la central, al mercado o a otra ciudad.
 
     `dedupe_key` es único: dos réplicas de master que decidan lo mismo a la vez
     (enviar el reporte de un ciclo, reintentar una propuesta, publicar una oferta)
