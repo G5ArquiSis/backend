@@ -1,21 +1,15 @@
-"""Ciclo de vida del consumo AMQP: conexión, reconexión, ack y publicación.
+"""Ciclo de vida del consumo AMQP: conexión, reconexión, validación, ack y publicación.
 
-Este módulo contiene solo la parte de concurrencia (CLAUDE.md 10). Qué significa
-un mensaje lo resuelve events.py, y qué hacer con él, master_client.py.
-
-connector atiende dos colas, cada una con su conexión y su hilo:
-
-- La del observer, con los demand-set de la E0, que se reenvían a POST /events.
-- La de la ciudad (city.{CODE}.q), con el protocolo de la E1: valida, responde ACK
-  o NACK, entrega el mensaje a master y publica lo que master tiene pendiente.
-
-Política de confirmación al broker, que es lo que sostiene RNF1 y AD1:
-  - Mensaje malformado -> se confirma y se registra. Reencolarlo lo haría circular
-    para siempre y taparía la cola con algo que nunca podrá procesarse.
-  - master caído       -> nack(requeue=True), sin ACK a la central. El broker es la
-    fuente de verdad de lo pendiente; no hay una cola propia en memoria.
-  - master confirmó    -> se confirma al broker y se responde ACK a la central.
+Este módulo implementa el quantum connector (protocolo v3):
+- Observer: consume demand-set de la E0 por su cola dedicada.
+- Ciudad: consume city.{CODE}.q con validación de identidad (user_id == cityId),
+  manejo de tipos retirados, entrega a master, confirmación ACK/NACK y publicación
+  generalizada desde la outbox con limitador de tasa deslizante.
+- Mercado: consume market.{CODE} (feed público v3) drenando rápido hacia master
+  sin responder con ACK a nivel de aplicación.
 """
+
+from __future__ import annotations
 
 import json
 import logging
@@ -27,9 +21,23 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-import pika
-from pika.adapters.blocking_connection import BlockingChannel
-from pika.exceptions import AMQPError, NackError, UnroutableError
+try:
+    import pika
+    from pika.adapters.blocking_connection import BlockingChannel
+    from pika.exceptions import AMQPError, NackError, UnroutableError
+except ImportError:
+    pika = None  # type: ignore
+    BlockingChannel = Any  # type: ignore
+
+    class AMQPError(Exception):  # type: ignore
+        pass
+
+    class NackError(AMQPError):  # type: ignore
+        pass
+
+    class UnroutableError(AMQPError):  # type: ignore
+        pass
+
 
 from config import Settings, get_settings
 from events import (
@@ -45,24 +53,53 @@ from master_client import MasterClient, MasterUnavailableError, MessageRejectedE
 
 logger = logging.getLogger(__name__)
 
-# Cada cuánto despierta el bucle aunque no lleguen mensajes: refresca la señal de
-# vida y revisa si toca pedirle a master lo pendiente por publicar.
+# Cada cuánto despierta el bucle aunque no lleguen mensajes
 _IDLE_SECONDS = 1
-# Pausa tras reencolar por master caído, para no girar en vacío sobre el mismo mensaje.
+# Pausa tras reencolar por master caído
 _REQUEUE_PAUSE_SECONDS = 1
-# Una conexión que duró al menos esto se considera sana; si vuelve a caerse, la espera
-# de reconexión parte otra vez del mínimo.
+# Una conexión que duró al menos esto se considera sana
 _STABLE_SECONDS = 60
+
+
+class SlidingWindowRateLimiter:
+    """Controla la tasa de envíos en una ventana deslizante de 60 segundos."""
+
+    def __init__(self, max_per_minute: int) -> None:
+        self.max_per_minute = max_per_minute
+        self._timestamps: list[float] = []
+
+    def acquire(self, now: float | None = None) -> bool:
+        """Retorna True y registra si se puede publicar; False si la ventana está llena."""
+        if now is None:
+            now = time.monotonic()
+        cutoff = now - 60.0
+        while self._timestamps and self._timestamps[0] <= cutoff:
+            self._timestamps.pop(0)
+
+        if len(self._timestamps) < self.max_per_minute:
+            self._timestamps.append(now)
+            return True
+        return False
+
+    def wait_time(self, now: float | None = None) -> float:
+        """Tiempo en segundos que se debe esperar para el siguiente cupo."""
+        if now is None:
+            now = time.monotonic()
+        cutoff = now - 60.0
+        while self._timestamps and self._timestamps[0] <= cutoff:
+            self._timestamps.pop(0)
+        if len(self._timestamps) < self.max_per_minute:
+            return 0.0
+        return max(0.01, 60.0 - (now - self._timestamps[0]))
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
     master = MasterClient()
-    # SIGTERM es lo que envía `docker stop`: se sale ordenadamente. Los mensajes sin
-    # confirmar vuelven a la cola solos cuando el broker ve cerrarse la conexión.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
+    # 1. Hilo para cola del observer (E0)
     observer = threading.Thread(
         target=consume_forever,
         args=("observer", settings.broker_user, settings.broker_password, settings),
@@ -76,6 +113,16 @@ def main() -> None:
         observer.join()
         return
 
+    # 2. Hilo para consumidor del feed de mercado (market.{CODE})
+    market_thread = threading.Thread(
+        target=consume_forever,
+        args=("market", settings.city_identity, settings.city_broker_password, settings),
+        kwargs={"serve": lambda channel: serve_market_queue(channel, master, settings)},
+        daemon=True,
+    )
+    market_thread.start()
+
+    # 3. La conexión de la ciudad corre en el hilo principal
     consume_forever(
         "ciudad",
         settings.city_identity,
@@ -92,15 +139,7 @@ def consume_forever(
     settings: Settings,
     serve: Callable[[BlockingChannel], None],
 ) -> None:
-    """Mantiene una conexión al broker y la vuelve a abrir cada vez que se cae.
-
-    La espera crece hasta un tope y vuelve al mínimo solo cuando la conexión se
-    sostuvo un rato. Conectarse no basta: un rechazo del broker justo después de
-    autenticar (por ejemplo, un permiso faltante) dejaría al consumidor reintentando
-    cada segundo para siempre. La señal de vida se refresca también mientras se
-    reintenta: un broker caído no vuelve unhealthy al contenedor, porque reiniciarlo
-    no arregla nada y el resto del sistema sigue sirviendo lo ya persistido.
-    """
+    """Mantiene una conexión al broker y la vuelve a abrir cada vez que se cae."""
     delay = settings.reconnect_initial_delay_seconds
     while True:
         connection = None
@@ -126,32 +165,31 @@ def consume_forever(
         delay = min(delay * 2, settings.reconnect_max_delay_seconds)
 
 
-# --- Cola de la ciudad (E1) ------------------------------------------------------------
+# --- Cola de la ciudad (E1 / E2) -------------------------------------------------------
 
 
 def serve_city_queue(channel: BlockingChannel, master: MasterClient, settings: Settings) -> None:
-    """Consume la cola de la ciudad y, entre mensaje y mensaje, publica lo pendiente de master."""
+    """Consume la cola de la ciudad y publica lo pendiente de master con rate limiters."""
     queue = settings.city_queue_name
-    # Con confirmaciones del broker, publicar a un destino que no existe levanta una
-    # excepción en vez de perder el mensaje en silencio.
     channel.confirm_delivery()
     channel.basic_qos(prefetch_count=10)
-    # La cola no se declara, ni siquiera en modo pasivo: es de la central, y el usuario
-    # de la ciudad no tiene permiso de configuración sobre ella (el broker responde
-    # 403 ACCESS_REFUSED y cierra el canal). Solo se consume.
     logger.info("Escuchando la cola %s", queue)
 
-    # -inf: la primera vuelta consulta de inmediato, sin esperar un intervalo completo.
+    market_limiter = SlidingWindowRateLimiter(settings.market_ops_per_minute)
+    request_limiter = SlidingWindowRateLimiter(settings.request_ops_per_minute)
+
     last_poll = float("-inf")
-    for method, _properties, body in channel.consume(queue, inactivity_timeout=_IDLE_SECONDS):
+    for method, properties, body in channel.consume(queue, inactivity_timeout=_IDLE_SECONDS):
         if method is not None:
-            handle_city_delivery(channel, method.delivery_tag, body, master, settings)
+            handle_city_delivery(
+                channel, method.delivery_tag, body, master, settings, properties=properties
+            )
 
         record_heartbeat("ciudad")
         now = time.monotonic()
         if now - last_poll >= settings.outbox_poll_seconds:
             last_poll = now
-            publish_pending(channel, master, settings)
+            publish_pending(channel, master, settings, market_limiter, request_limiter)
 
 
 def handle_city_delivery(
@@ -160,24 +198,21 @@ def handle_city_delivery(
     body: bytes,
     master: MasterClient,
     settings: Settings,
+    properties: pika.BasicProperties | None = None,
 ) -> None:
-    """Procesa una entrega y decide si se confirma al broker o se reencola."""
+    """Procesa una entrega en city.{CODE}.q y decide si se confirma o reencola."""
     try:
-        process_city_message(channel, body, master, settings)
+        process_city_message(channel, body, master, settings, properties=properties)
     except MasterUnavailableError as error:
         logger.warning("master no disponible, se reencola el mensaje: %s", error)
         channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
         time.sleep(_REQUEUE_PAUSE_SECONDS)
         return
     except (UnroutableError, NackError) as error:
-        # master ya guardó el mensaje; lo que no llegó es nuestra respuesta a la central.
-        # Reencolar no lo arregla y solo repetiría el mensaje como duplicado.
-        logger.error("La central no recibió nuestra respuesta: %r", error)
+        logger.error("No se pudo entregar respuesta al emisor: %r", error)
     except AMQPError:
-        # Falló el canal: la entrega queda sin confirmar y el broker la reenvía al reconectar.
         raise
     except Exception as error:
-        # Un error nuestro con un mensaje puntual: reencolarlo lo haría fallar para siempre.
         logger.exception("Falla procesando un mensaje; se descarta y se registra")
         master.guardar_log_master("discarded", _as_text(body), f"error interno: {error!r}")
 
@@ -185,27 +220,32 @@ def handle_city_delivery(
 
 
 def process_city_message(
-    channel: BlockingChannel, body: bytes, master: MasterClient, settings: Settings
+    channel: BlockingChannel,
+    body: bytes,
+    master: MasterClient,
+    settings: Settings,
+    properties: pika.BasicProperties | None = None,
 ) -> None:
-    """Valida un mensaje de la central, lo entrega a master y responde ACK o NACK."""
-    message, nack, discard_reason = validacion_mensaje_entrante(body, settings.city_code)
+    """Valida un mensaje entrante (identidad y envelope), lo entrega a master y responde."""
+    user_id = properties.user_id if properties else None
+    message, nack, discard_reason = validacion_mensaje_entrante(
+        body, settings.city_code, user_id=user_id
+    )
 
     if discard_reason is not None:
-        # No hay msgId válido al cual responder: solo queda registrarlo.
         logger.warning("Mensaje descartado: %s", discard_reason)
         master.guardar_log_master("discarded", _as_text(body), discard_reason)
         return
 
     if nack is not None:
-        _reject(channel, nack, body, master, settings)
+        target_rk = nack.pop("_target_routing_key", None)
+        _reject(channel, nack, body, master, settings, target_routing_key=target_rk)
         return
 
     try:
         outcome = master.enviar_evento_master(message)
     except MessageRejectedError as error:
-        # El envelope estaba bien, pero al contenido le falta algo que su tipo exige.
         if message["type"] in TYPES_WITHOUT_ACK:
-            # Tampoco hay NACK de un ACK, de un NACK ni de un error: solo queda el registro.
             logger.warning("%s inválido, se descarta sin responder: %s", message["type"], error)
             reason = f"Contenido inválido para {message['type']}: {error}"[:300]
             master.guardar_log_master("discarded", _as_text(body), reason)
@@ -223,20 +263,98 @@ def process_city_message(
         return
 
     logger.info("type=%s msgId=%s -> %s", message["type"], message["msgId"], outcome)
-    # El ACK sale después de que master guardó el mensaje: solo confirma recepción,
-    # pero no tiene sentido confirmar algo que todavía podríamos perder.
+
+    # Respuesta de ACK de recepción solo para mensajes que no están en TYPES_WITHOUT_ACK
     if message["type"] not in TYPES_WITHOUT_ACK:
-        publish_to_central(
-            channel, construir_mensaje_ack(message["msgId"], settings.city_code), settings
+        sender_city = message.get("cityId")
+        if sender_city and message["type"] in ("bid", "bid-accepted"):
+            # ACK directo a la cola de la ciudad emisora
+            publish_message(
+                channel,
+                exchange="energy.x",
+                routing_key=f"city.{sender_city}",
+                payload=construir_mensaje_ack(message["msgId"], settings.city_code),
+                settings=settings,
+            )
+        else:
+            # ACK a la central
+            publish_message(
+                channel,
+                exchange=settings.central_exchange,
+                routing_key=settings.central_routing_key,
+                payload=construir_mensaje_ack(message["msgId"], settings.city_code),
+                settings=settings,
+            )
+
+
+# --- Cola del Mercado / Feed público (v3) ---------------------------------------------
+
+
+def serve_market_queue(channel: BlockingChannel, master: MasterClient, settings: Settings) -> None:
+    """Consume el feed del mercado (market.{CODE}) drenando rápido y sin enviar ACK."""
+    queue = settings.market_queue_name
+    channel.basic_qos(prefetch_count=50)
+    logger.info("Escuchando el feed de mercado en la cola %s", queue)
+
+    for method, _properties, body in channel.consume(queue, inactivity_timeout=_IDLE_SECONDS):
+        if method is not None:
+            handle_market_delivery(channel, method.delivery_tag, body, master, settings)
+        record_heartbeat()
+
+
+def handle_market_delivery(
+    channel: BlockingChannel,
+    delivery_tag: int,
+    body: bytes,
+    master: MasterClient,
+    settings: Settings,
+) -> None:
+    """Procesa un mensaje de mercado: lo persiste en master y confirma solo a AMQP."""
+    try:
+        message = json.loads(body.decode("utf-8"))
+    except Exception as err:
+        logger.error("Mensaje de mercado no parseable: %s", err)
+        channel.basic_ack(delivery_tag=delivery_tag)
+        return
+
+    try:
+        outcome = master.enviar_evento_master(message)
+        logger.info(
+            "market type=%s msgId=%s -> %s",
+            message.get("type"),
+            message.get("msgId"),
+            outcome,
         )
+    except MasterUnavailableError as error:
+        logger.warning("master no disponible, se reencola mensaje de mercado: %s", error)
+        channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+        time.sleep(_REQUEUE_PAUSE_SECONDS)
+        return
+    except MessageRejectedError as error:
+        logger.warning("Mensaje de mercado rechazado por master: %s", error)
+    except Exception as error:
+        logger.exception("Error procesando mensaje de mercado: %s", error)
+
+    # Confirmación obligatoria al broker para no tapar la cola. SIN ACK de aplicación.
+    channel.basic_ack(delivery_tag=delivery_tag)
 
 
-def publish_pending(channel: BlockingChannel, master: MasterClient, settings: Settings) -> None:
-    """Publica a la central lo que master tiene en su outbox y confirma cada envío.
+# --- Publicación generalizada y Outbox --------------------------------------------------
 
-    Si un envío falla no se confirma: master lo vuelve a ofrecer más tarde. Repetir
-    un mensaje es inocuo, porque conserva su idpk.
-    """
+
+def publish_pending(
+    channel: BlockingChannel,
+    master: MasterClient,
+    settings: Settings,
+    market_limiter: SlidingWindowRateLimiter | None = None,
+    request_limiter: SlidingWindowRateLimiter | None = None,
+) -> None:
+    """Publica mensajes pendientes de outbox respetando los destinos y rate limits."""
+    if market_limiter is None:
+        market_limiter = SlidingWindowRateLimiter(settings.market_ops_per_minute)
+    if request_limiter is None:
+        request_limiter = SlidingWindowRateLimiter(settings.request_ops_per_minute)
+
     try:
         pending = master.retirar_pendientes()
     except MasterUnavailableError as error:
@@ -244,33 +362,97 @@ def publish_pending(channel: BlockingChannel, master: MasterClient, settings: Se
         return
 
     for item in pending:
+        payload = item.get("payload", {})
+        msg_type = payload.get("type")
+        exchange = item.get("exchange") or settings.central_exchange
+        routing_key = (
+            item.get("routing_key") or item.get("routingKey") or settings.central_routing_key
+        )
+
+        # 1. Límite de operaciones de mercado (máx 60/min)
+        if (
+            msg_type in ("offer", "offer-updated", "offer-withdrawn")
+            or exchange == settings.market_exchange
+        ):
+            if not market_limiter.acquire():
+                logger.warning(
+                    "Límite de operaciones de mercado alcanzado (60/min). "
+                    "Se espera al siguiente poll."
+                )
+                continue
+
+        # 2. Límite de requests directos a la central (máx 10/min)
+        elif msg_type == "request" and not request_limiter.acquire():
+            logger.warning("Límite de requests alcanzado (10/min). Se espera al siguiente poll.")
+            continue
+
         try:
-            publish_to_central(channel, item["payload"], settings)
+            publish_message(channel, exchange, routing_key, payload, settings)
             master.confirmar_envio(item["id"])
         except (UnroutableError, NackError) as error:
-            logger.error("La central no recibió el mensaje %s: %r", item["id"], error)
+            logger.error(
+                "Destino %s / %s no recibió el mensaje %s: %r",
+                exchange,
+                routing_key,
+                item["id"],
+                error,
+            )
         except MasterUnavailableError as error:
             logger.warning("Publicado, pero master no registró el envío %s: %s", item["id"], error)
+
+
+def publish_message(
+    channel: BlockingChannel,
+    exchange: str,
+    routing_key: str,
+    payload: dict[str, Any],
+    settings: Settings,
+) -> None:
+    """Publica un mensaje AMQP con user_id de la ciudad y entrega obligatoria."""
+    props = (
+        pika.BasicProperties(
+            content_type="application/json",
+            delivery_mode=2,
+            user_id=settings.city_identity,
+        )
+        if pika is not None
+        else type(
+            "BasicProperties",
+            (),
+            {
+                "user_id": settings.city_identity,
+                "content_type": "application/json",
+                "delivery_mode": 2,
+            },
+        )()
+    )
+    channel.basic_publish(
+        exchange=exchange,
+        routing_key=routing_key,
+        body=json.dumps(payload).encode("utf-8"),
+        properties=props,
+        mandatory=True,
+    )
+    logger.info(
+        "Publicado en %s (rk=%s) type=%s msgId=%s",
+        exchange,
+        routing_key,
+        payload.get("type"),
+        payload.get("msgId"),
+    )
 
 
 def publish_to_central(
     channel: BlockingChannel, payload: dict[str, Any], settings: Settings
 ) -> None:
-    """Publica un mensaje a la central con la identidad de la ciudad."""
-    channel.basic_publish(
+    """Publica a la central (mantiene retrocompatibilidad)."""
+    publish_message(
+        channel,
         exchange=settings.central_exchange,
         routing_key=settings.central_routing_key,
-        body=json.dumps(payload).encode("utf-8"),
-        properties=pika.BasicProperties(
-            content_type="application/json",
-            delivery_mode=2,
-            # user_id es una propiedad del publish, no un campo del cuerpo. El broker la
-            # valida contra la conexión y la central la compara con cityId.
-            user_id=settings.city_identity,
-        ),
-        mandatory=True,
+        payload=payload,
+        settings=settings,
     )
-    logger.info("Publicado type=%s msgId=%s", payload.get("type"), payload.get("msgId"))
 
 
 def _reject(
@@ -279,9 +461,19 @@ def _reject(
     body: bytes,
     master: MasterClient,
     settings: Settings,
+    target_routing_key: str | None = None,
 ) -> None:
     logger.warning("Se responde NACK por %s", nack["reason"])
-    publish_to_central(channel, nack, settings)
+    if target_routing_key:
+        publish_message(
+            channel,
+            exchange="energy.x",
+            routing_key=target_routing_key,
+            payload=nack,
+            settings=settings,
+        )
+    else:
+        publish_to_central(channel, nack, settings)
     master.guardar_log_master("nack", _as_text(body), nack["reason"])
 
 
@@ -352,7 +544,7 @@ def _close_quietly(connection: pika.BlockingConnection | None) -> None:
         return
     try:
         connection.close()
-    except Exception:  # noqa: BLE001 - ya se está cerrando; no hay nada que hacer con el error
+    except Exception:
         logger.debug("La conexión ya estaba rota al cerrarla")
 
 

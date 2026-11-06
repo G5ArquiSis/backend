@@ -69,6 +69,16 @@ class Destination:
         """Alias de Destination.city(code)."""
         return Destination.city(code)
 
+    @property
+    def exchange(self) -> str:
+        """Exchange AMQP al que se publicará el mensaje."""
+        return self.resolve()[0]
+
+    @property
+    def routing_key(self) -> str:
+        """Routing key AMQP con la que se publicará el mensaje."""
+        return self.resolve()[1]
+
     def resolve(self, our_city_code: str = "TAL") -> tuple[str, str]:
         """Calcula el par (exchange, routing_key) según el protocolo v3 y credenciales.
 

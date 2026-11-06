@@ -86,4 +86,42 @@
 - **Correcciones del integrante:** Ninguna requerida; implementación probada y verificada.
 - **Referencia:** Rama `feat/a0-outbox-destino`.
 
+## 2026-11-06 — Schemas JSON del protocolo v3 y Simulador de mercado (Tareas A5 y A6)
+- **Herramienta y modo:** Antigravity, Gemini 3.8 Flash, agéntico.
+- **Tarea:** Definir los contratos formales en JSON Schema del protocolo v3 en el repositorio `contratos` (Tarea A5) e implementar el simulador de mercado con la ciudad fantasma MET en `backend` (Tarea A6) para habilitar las pruebas locales de los roles C y D y los tests de contrato en CI de E.
+- **Prompts relevantes:**
+  > "Ahora vamos con el paso 2: necesitamos dejar listos todos los schemas JSON del protocolo v3 en contratos para destrabar al equipo con el CI y armar el script del simulador de mercado local con la ciudad fantasma MET en backend"
+- **Qué produjo la IA:**
+  - `contratos/schemas/`:
+    - 14 nuevos esquemas JSON: ofertas de mercado (`offer.schema.json`, `offer-updated.schema.json`, `offer-withdrawn.schema.json`, `market-closed.schema.json`), mensajes entre ciudades (`bid.schema.json`, `bid-accepted.schema.json`, `bid-rejected.schema.json`), liquidaciones centrales (`trade-recorded.schema.json`, `imbalance-settlement.schema.json`) y eventos asíncronos de wallet (`swap-proposed.schema.json`, `swap-settled.schema.json`, `swap-rejected.schema.json`, `swap-expired.schema.json`, `swap-cancelled.schema.json`).
+    - Actualización de esquemas extendidos v3: `envelope.schema.json` con todos los tipos válidos, `status-statement.schema.json` con bloque `market` y `sellable`, `transfer.schema.json` con `balanceAfter`/`creditLine`/`penalty`, y `distance-table.schema.json` con `disabledRouteTransportCost` y estado de enlaces `enabled`.
+    - Marcado de schemas retirados de E1 (`demand-statement`, `give-take`, `negotiation-proposal`) como deprecados/retirados con código 410 `TYPE_RETIRED`.
+    - Documentación completa en `contratos/schemas/README.md`.
+  - `contratos/AGENTS.md`: Incorporación de la sección "Protocolo v3: Mercado, Wallet y Reglas que no se rompen", especificando el intercambio de bids y ofertas, la verificación obligatoria de `user_id == city.{CODE}`, la validación de JWTs `swapToken` de la wallet y la ausencia de ACKs en el mercado público.
+  - `backend/scripts/simulador_mercado.py`: Script CLI ejecutable para inyección de eventos en master (`/internal/messages`) o RabbitMQ, con modos para feed de mercado, posturas directas, anomalías de identidad (`IDENTITY_MISMATCH`), mensajes malformados y la emulación de la ciudad fantasma MET con descenso periódico de precios.
+  - `backend/README.md`: Documentación de uso y ejemplos de comandos del simulador para el equipo.
+- **Verificación:** Validación sintáctica de todos los esquemas JSON (`ALL JSON SCHEMAS ARE VALID`), validación con `py_compile` de `simulador_mercado.py` y ejecución de prueba del simulador con `--help`.
+- **Correcciones del integrante:** Ninguna requerida; esquemas y simulador alineados con las referencias oficiales de la API v3.
+- **Referencia:** Rama `feat/a5-a6-schemas-simulador`.
+
+## 2026-11-06 — Mensajería, protocolo de mercado y outbox generalizada (Tareas A1, A2, A3 y A4)
+- **Herramienta y modo:** Antigravity, Gemini 3.8 Flash, agéntico.
+- **Tarea:** Implementar el consumidor del feed de mercado público `market.TAL` sin ACK de aplicación (Tarea A1), validación estricta de identidad AMQP con NACK `IDENTITY_MISMATCH` (403) y manejo de tipos retirados (Tarea A2), publicación generalizada con limitador de tasa deslizante de 60s (Tarea A3), y migración del esquema de outbox con `exchange` y `routing_key` en PostgreSQL y DTOs (Tarea A4).
+- **Prompts relevantes:**
+  > "Pasemos ahora al paso 3: implementemos el consumidor de la cola de mercado market.TAL sin ACK de aplicación, la validación de user_id con NACK IDENTITY_MISMATCH, la migración de la outbox con exchange y routing_key, y la publicación con rate limiter para dejar lista la mensajería del connector."
+- **Qué produjo la IA:**
+  - `backend/connector/config.py`: Ajuste de configuración AMQP para producción vhost `energy`, `market_queue_name = "market.TAL"` (sin `.q`), `market_offer_routing_key = "market.offer.TAL"`, límites `market_ops_per_minute = 60` y `request_ops_per_minute = 10`, y compatibilidad de entorno cuando `pydantic_settings` no está instalado en entornos locales de prueba.
+  - `backend/connector/events.py`: Definición de `VALID_TYPES`, `RETIRED_TYPES` y `TYPES_WITHOUT_ACK`. Actualización de `validacion_mensaje_entrante` para verificar correspondencia de `user_id == f"city.{sender_city}"`. Si hay discrepancia, emite NACK `IDENTITY_MISMATCH` (código 403) dirigido a la cola real de quien publicó (`user_id`), o descarta si no hay identidad confiable. Descarte automático y registro sin NACK de tipos retirados de E1 (`TYPE_RETIRED`).
+  - `backend/connector/consumer.py`:
+    - Clase `SlidingWindowRateLimiter` para ventana deslizante de 60 segundos por categoría de operación (ofertas de mercado max 60/min, peticiones max 10/min), reteniendo mensajes en la outbox sin descartar cuando se sobrepasa el límite.
+    - Publicación en `publish_message` generalizada hacia cualquier `exchange` y `routing_key` de la outbox, inyectando siempre la identidad propia `user_id="city.TAL"`.
+    - Hilo y loop de consumo `serve_market_queue` y `handle_market_delivery` para la cola `market.TAL`: persiste eventos en master y confirma con `basic_ack` a RabbitMQ, garantizando que nunca se envíen ACKs de aplicación al mercado.
+  - `backend/master/app/migrations/sql/0001_outbox_exchange_routing_key.sql`: Migración SQL idempotente que agrega `exchange` (`VARCHAR(64) DEFAULT 'energy.x'`) y `routing_key` (`VARCHAR(128) DEFAULT 'central'`) a la tabla `outbox` con índice en `exchange`.
+  - `backend/master/app/models.py`, `backend/master/app/cycle_schemas.py`, `backend/master/app/routers/internal.py`, `backend/master/app/outbox.py`: Integración de las columnas `exchange` y `routing_key` en el modelo SQLAlchemy `OutboxMessage`, el schema Pydantic `OutboxItem`, el endpoint de reclamo `/internal/outbox/claim` y properties helper en `Destination`.
+  - `backend/connector/tests/test_v3_protocol.py`: Suite exhaustiva de pruebas unitarias que valida `SlidingWindowRateLimiter`, rechazo de `IDENTITY_MISMATCH` con NACK al atacante, descarte de tipos retirados, persistencia de mercado sin ACK de aplicación, y enrutamiento con rate limiting desde outbox.
+- **Verificación:** Ejecución y paso del 100% de las pruebas en `test_v3_protocol.py` (8 passed), `test_events.py` (8 passed) y `test_outbox.py` (5 passed).
+- **Correcciones del integrante:** Se corrigieron los dobles de prueba en los tests de `connector` para compatibilidad con `MasterClient` y `Settings`.
+- **Referencia:** Rama `feat/a1-a4-mensajeria-protocolo`.
+
+
 
