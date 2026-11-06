@@ -1,6 +1,5 @@
 """Tests de las reglas del protocolo v3 en connector (Tareas A1, A2, A3)."""
 
-import json
 import time
 
 import httpx
@@ -10,13 +9,10 @@ from config import Settings
 from consumer import (
     SlidingWindowRateLimiter,
     handle_market_delivery,
-    process_city_message,
     publish_pending,
 )
 from events import (
     RETIRED_TYPES,
-    TYPES_WITHOUT_ACK,
-    construir_mensaje_ack,
     validacion_mensaje_entrante,
 )
 
@@ -54,7 +50,8 @@ def test_rate_limiter_allows_up_to_capacity_and_blocks_overflow() -> None:
 
 
 def test_identity_mismatch_with_wrong_user_id_emits_nack() -> None:
-    """A2: Un bid con user_id ajeno ('city.ATTACKER' vs cityId 'COR') recibe NACK IDENTITY_MISMATCH (403)."""
+    """A2: Un bid con user_id ajeno ('city.ATTACKER' vs cityId 'COR') recibe NACK
+    IDENTITY_MISMATCH (403)."""
     bid = {
         "idpk": "bid-idpk-1",
         "msgId": "msg-bid-1",
@@ -112,9 +109,7 @@ def test_valid_bid_with_matching_user_id_passes() -> None:
     }
     body = as_body(bid)
 
-    message, nack, discard = validacion_mensaje_entrante(
-        body, city_code="TAL", user_id="city.COR"
-    )
+    message, nack, discard = validacion_mensaje_entrante(body, city_code="TAL", user_id="city.COR")
 
     assert (nack, discard) == (None, None)
     assert message is not None
@@ -139,8 +134,11 @@ def test_retired_type_is_discarded_without_nack() -> None:
 
 
 def test_handle_market_delivery_persists_and_acks_broker_without_app_ack(master_with) -> None:
-    """A1: Los mensajes del feed de mercado se persisten y se confirman a RabbitMQ sin enviar ACK de aplicación."""
-    master = RecordingMaster({"/internal/messages": httpx.Response(200, json={"outcome": "applied"})})
+    """A1: Los mensajes del feed de mercado se persisten y se confirman a RabbitMQ sin enviar
+    ACK de aplicación."""
+    master = RecordingMaster(
+        {"/internal/messages": httpx.Response(200, json={"outcome": "applied"})}
+    )
     channel = FakeChannel()
 
     offer = {
@@ -151,7 +149,9 @@ def test_handle_market_delivery_persists_and_acks_broker_without_app_ack(master_
     }
     body = as_body(offer)
 
-    handle_market_delivery(channel, delivery_tag=42, body=body, master=master_with(master), settings=SETTINGS)
+    handle_market_delivery(
+        channel, delivery_tag=42, body=body, master=master_with(master), settings=SETTINGS
+    )
 
     # Confirmado a RabbitMQ
     assert channel.acked == [42]
@@ -177,7 +177,12 @@ def test_publish_pending_routes_to_market_and_cities_with_rate_limiting(master_w
             "id": 102,
             "exchange": "energy.x",
             "routing_key": "city.COR",
-            "payload": {"type": "bid", "cycleId": "c1", "cityId": "TAL", "data": {"offerId": "COR-1"}},
+            "payload": {
+                "type": "bid",
+                "cycleId": "c1",
+                "cityId": "TAL",
+                "data": {"offerId": "COR-1"},
+            },
         },
     ]
 
@@ -201,7 +206,8 @@ def test_publish_pending_routes_to_market_and_cities_with_rate_limiting(master_w
 
 
 def test_publish_pending_respects_rate_limit_and_does_not_drop(master_with) -> None:
-    """A3: Cuando se alcanza el tope de mercado (60/min), los mensajes remanentes no se descartan ni confirman."""
+    """A3: Cuando se alcanza el tope de mercado (60/min), los mensajes remanentes no se
+    descartan ni confirman."""
     market_items = [
         {
             "id": i,
@@ -223,7 +229,9 @@ def test_publish_pending_respects_rate_limit_and_does_not_drop(master_with) -> N
     # Limiter con capacidad 2
     small_limiter = SlidingWindowRateLimiter(max_per_minute=2)
 
-    publish_pending(channel, master_with(master), SETTINGS, small_limiter, SlidingWindowRateLimiter(10))
+    publish_pending(
+        channel, master_with(master), SETTINGS, small_limiter, SlidingWindowRateLimiter(10)
+    )
 
     # Solo 2 deben haberse publicado y confirmado
     assert len(channel.published) == 2

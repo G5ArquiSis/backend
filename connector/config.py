@@ -7,6 +7,7 @@ try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
 except ImportError:
     import os
+
     from pydantic import BaseModel
 
     def SettingsConfigDict(**kwargs):  # noqa: N802

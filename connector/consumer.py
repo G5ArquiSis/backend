@@ -38,6 +38,7 @@ except ImportError:
     class UnroutableError(AMQPError):  # type: ignore
         pass
 
+
 from config import Settings, get_settings
 from events import (
     TYPES_WITHOUT_ACK,
@@ -180,7 +181,9 @@ def serve_city_queue(channel: BlockingChannel, master: MasterClient, settings: S
     last_poll = float("-inf")
     for method, properties, body in channel.consume(queue, inactivity_timeout=_IDLE_SECONDS):
         if method is not None:
-            handle_city_delivery(channel, method.delivery_tag, body, master, settings, properties=properties)
+            handle_city_delivery(
+                channel, method.delivery_tag, body, master, settings, properties=properties
+            )
 
         record_heartbeat()
         now = time.monotonic()
@@ -373,17 +376,15 @@ def publish_pending(
         ):
             if not market_limiter.acquire():
                 logger.warning(
-                    "Límite de operaciones de mercado alcanzado (60/min). Se espera al siguiente poll."
+                    "Límite de operaciones de mercado alcanzado (60/min). "
+                    "Se espera al siguiente poll."
                 )
                 continue
 
         # 2. Límite de requests directos a la central (máx 10/min)
-        elif msg_type == "request":
-            if not request_limiter.acquire():
-                logger.warning(
-                    "Límite de requests alcanzado (10/min). Se espera al siguiente poll."
-                )
-                continue
+        elif msg_type == "request" and not request_limiter.acquire():
+            logger.warning("Límite de requests alcanzado (10/min). Se espera al siguiente poll.")
+            continue
 
         try:
             publish_message(channel, exchange, routing_key, payload, settings)
@@ -418,7 +419,11 @@ def publish_message(
         else type(
             "BasicProperties",
             (),
-            {"user_id": settings.city_identity, "content_type": "application/json", "delivery_mode": 2},
+            {
+                "user_id": settings.city_identity,
+                "content_type": "application/json",
+                "delivery_mode": 2,
+            },
         )()
     )
     channel.basic_publish(

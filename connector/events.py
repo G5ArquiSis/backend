@@ -197,7 +197,8 @@ def validacion_mensaje_entrante(
                 f"IDENTITY_MISMATCH: falta user_id AMQP en {msg_type} de ciudad {sender_city}",
             )
         if user_id != expected_user_id:
-            # user_id no corresponde a su cityId: responde NACK IDENTITY_MISMATCH a la cola de quien publicó
+            # user_id no corresponde a su cityId: responde NACK IDENTITY_MISMATCH a la cola
+            # de quien publicó
             if user_id.startswith("city."):
                 return nack(
                     "IDENTITY_MISMATCH",
@@ -208,7 +209,8 @@ def validacion_mensaje_entrante(
             return (
                 None,
                 None,
-                f"IDENTITY_MISMATCH: user_id '{user_id}' ajeno y no corresponde a cityId '{sender_city}'",
+                f"IDENTITY_MISMATCH: user_id '{user_id}' ajeno y no corresponde a cityId "
+                f"'{sender_city}'",
             )
 
     # 4. Validación del envelope estándar
