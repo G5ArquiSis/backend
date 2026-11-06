@@ -1,4 +1,4 @@
--- Migración 0001: Agrega exchange y routing_key a la tabla outbox (Tarea A4)
+-- Migración 0004: Agrega exchange y routing_key a la tabla outbox (Tarea A4)
 -- Idempotente: filas viejas de la E1 quedan con destino a la central por defecto.
 
 ALTER TABLE outbox ADD COLUMN IF NOT EXISTS exchange VARCHAR(64) NOT NULL DEFAULT 'energy.x';
