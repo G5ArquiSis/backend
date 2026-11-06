@@ -201,7 +201,8 @@ async def test_demand_statement_follows_the_sign_convention(db: AsyncSession) ->
     assert await total_budget(db) == Decimal("-222500")
 
 
-@pytest.mark.skip(reason="Temporal E2: prueba heredada de E1; reemplazar por cobertura v3 antes de la entrega")
+@pytest.mark.skip(reason="Temporal E2: prueba heredada de E1; reemplazar por cobertura v3 "
+                  "antes de la entrega")
 async def test_budget_carries_over_between_cycles_and_energy_does_not(db: AsyncSession) -> None:
     await apply(db, status_statement())
     await apply(db, central("transfer", "transfer-1", {"quantity": 1000}))
