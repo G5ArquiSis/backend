@@ -32,13 +32,14 @@ SUMMARIES = {
     ("/health", "get"): "Estado del servicio",
     ("/history", "get"): "Historial de demand-set de la E0, paginado y filtrable",
     ("/history/{event_id}", "get"): "Detalle de un evento demand-set de la E0",
-    ("/negotiations", "post"): "Crear una propuesta de negociación (RF04)",
+    ("/negotiations", "post"): "Retirado en el protocolo v3: siempre responde 410",
     ("/negotiations", "get"): "Historial de negociaciones (RF04)",
     ("/negotiations/{negotiation_id}", "get"): "Detalle de una negociación (RF04)",
     ("/cycles", "get"): "Ciclos con su balance y el presupuesto actual (RF01)",
     ("/cycles/{cycle_id}", "get"): "Historial completo de un ciclo (RF01)",
     ("/connectivity", "get"): "Distance-table vigente (RF02)",
     ("/message-log", "get"): "Mensajes duplicados, descartados o con NACK (RF05)",
+    ("/wallet/balance-status", "get"): "Balance oficial de la wallet y su conciliación (AD5)",
 }
 PUBLIC_WITHOUT_TOKEN = {"/health"}
 
@@ -66,26 +67,6 @@ NOT_FOUND = {
     "/history/{event_id}": "Evento no encontrado",
 }
 
-CONFLICT_SCHEMA = {
-    "title": "NegotiationConflict",
-    "type": "object",
-    "required": ["detail"],
-    "properties": {
-        "detail": {
-            "type": "object",
-            "required": ["reason", "message"],
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "enum": ["CYCLE_EXPIRED", "PRICE_ABOVE_CAP", "OVER_CAPACITY"],
-                    "description": "Mismos nombres de error que usa la central",
-                },
-                "message": {"type": "string", "description": "Explicación legible"},
-            },
-        }
-    },
-}
-
 ERROR_SCHEMA = {
     "title": "ErrorDetail",
     "type": "object",
@@ -108,7 +89,6 @@ def build_spec() -> dict:
     components["securitySchemes"] = {
         "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}
     }
-    components["schemas"]["NegotiationConflict"] = CONFLICT_SCHEMA
     components["schemas"]["ErrorDetail"] = ERROR_SCHEMA
 
     spec["paths"] = {
@@ -119,6 +99,11 @@ def build_spec() -> dict:
 
     for path, operations in spec["paths"].items():
         for method, operation in operations.items():
+            if (path, method) not in SUMMARIES:
+                sys.exit(
+                    f"{method.upper()} {path} no tiene resumen en SUMMARIES: agregarlo aquí, "
+                    "y la ruta al regex protegido de deploy/nginx/*.conf"
+                )
             operation["summary"] = SUMMARIES[(path, method)]
             responses = operation["responses"]
             for response in responses.values():
@@ -133,9 +118,10 @@ def build_spec() -> dict:
             if path in NOT_FOUND:
                 responses["404"] = _json_response(NOT_FOUND[path], "ErrorDetail")
             if path == "/negotiations" and method == "post":
-                responses["409"] = _json_response(
-                    "No hay ventana abierta, el precio supera el tope o el give excede lo vendible",
-                    "NegotiationConflict",
+                # Retirado en v3 (negotiation-proposal ya no existe): no hay respuesta correcta.
+                responses["410"] = _json_response(
+                    "Siempre: negotiation-proposal está retirado en el protocolo v3",
+                    "ErrorDetail",
                 )
 
     _drop_unused_schemas(spec)

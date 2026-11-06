@@ -14,12 +14,21 @@ on:
       - "**.md"
   pull_request:
   workflow_dispatch:
+    inputs:
+      sha:
+        description: >-
+          Rollback: SHA completo de un deploy anterior (sus imágenes deben seguir en ECR, que
+          guarda las últimas 10). Vacío: deploy normal de main.
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
   test:
+    # Un rollback vuelve a imágenes que ya pasaron los tests cuando se desplegaron.
+    if: inputs.sha == ''
     runs-on: ubuntu-latest
     # Postgres real para que los tests de integración (JSONB, índice único de idpk,
     # TIMESTAMPTZ) corran en CI en vez de saltarse.
@@ -42,9 +51,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r master/requirements.txt -r connector/requirements.txt pytest pytest-asyncio httpx ruff
+      - run: pip install -r master/requirements.txt -r connector/requirements.txt -r scripts/fake_wallet/requirements.txt pytest pytest-asyncio httpx ruff jsonschema rfc3339-validator
       - run: ruff check .
+      # Contract tests (E4, RDOC04): los mensajes que arman connector y master se validan
+      # contra los schemas del curso (fijos en v3.0.2) y contra los del grupo (main de
+      # contratos: un cambio de contrato se mergea allá antes que su código). Con
+      # CONTRACTS_REQUIRED=1 un clon faltante falla en vez de saltar los tests.
+      - name: Clonar contratos (curso v3.0.2 y G5ArquiSis/contratos)
+        run: |
+          git clone --quiet --depth 1 --branch v3.0.2 \
+            https://github.com/iic2173/energyshark-contracts.git "$RUNNER_TEMP/contratos-curso"
+          git clone --quiet --depth 1 \
+            https://github.com/G5ArquiSis/contratos.git "$RUNNER_TEMP/contratos-grupo"
+          git -C "$RUNNER_TEMP/contratos-grupo" log -1 --format='contratos del grupo en %h: %s'
+          {
+            echo "ENERGYSHARK_CONTRACTS_DIR=$RUNNER_TEMP/contratos-curso"
+            echo "GROUP_CONTRACTS_DIR=$RUNNER_TEMP/contratos-grupo"
+            echo "CONTRACTS_REQUIRED=1"
+          } >> "$GITHUB_ENV"
       - run: pytest
+      # El OpenAPI de contratos se genera desde la app; si alguien cambia un router o un DTO
+      # sin regenerarlo (o edita el YAML a mano), este paso falla con el diff.
+      - name: OpenAPI de contratos al día con la app
+        run: |
+          python scripts/exportar_openapi.py "$RUNNER_TEMP/openapi.yaml"
+          # fastapi y pydantic no están fijados, y según la versión el schema de un Decimal lleva
+          # o no un `pattern`. Esa diferencia no cambia el contrato: se ignoran esas líneas.
+          if ! diff -u -I '^ *pattern: ' "$RUNNER_TEMP/contratos-grupo/openapi/openapi.yaml" "$RUNNER_TEMP/openapi.yaml"; then
+            echo "::error::contratos/openapi/openapi.yaml no coincide con la app. Regenerarlo con 'python scripts/exportar_openapi.py ../contratos/openapi/openapi.yaml' y mergearlo en contratos primero."
+            exit 1
+          fi
+      - name: AGENTS.md referenciado desde el README
+        run: grep -q "G5ArquiSis/contratos/blob/main/AGENTS.md" README.md || { echo "::error::README.md debe enlazar contratos/AGENTS.md"; exit 1; }
       # La imagen de master arranca bajo el agente de New Relic: se prueba acá, con una key
       # falsa, para que un entrypoint roto falle en el PR y no en el deploy a producción.
       - name: Smoke test de la imagen de master
@@ -65,7 +103,11 @@ jobs:
   deploy:
     needs: test
     # Sin las variables de AWS configuradas, el deploy se salta en vez de fallar.
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.AWS_ROLE_ARN != ''
+    # always(): con un rollback el job de tests se salta, y sin always() este también.
+    if: >-
+      always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      && vars.AWS_ROLE_ARN != ''
+      && (needs.test.result == 'success' || (needs.test.result == 'skipped' && inputs.sha != ''))
     runs-on: ubuntu-latest
     # Dos deploys a la vez podrían dejar la EC2 con una mezcla de versiones.
     concurrency:
@@ -78,7 +120,11 @@ jobs:
       AWS_REGION: ${{ vars.AWS_REGION }}
       EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
     steps:
+      # En un rollback, el compose, la config de Nginx y el script de deploy son los de ese
+      # commit, no los de main: tienen que calzar con sus imágenes.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -89,6 +135,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build y push a ECR (master y connector)
+        if: inputs.sha == ''
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
@@ -101,51 +148,55 @@ jobs:
           echo "MASTER_IMAGE=$REGISTRY/energyshark-master:$GITHUB_SHA" >> "$GITHUB_ENV"
           echo "CONNECTOR_IMAGE=$REGISTRY/energyshark-connector:$GITHUB_SHA" >> "$GITHUB_ENV"
 
+      - name: Imágenes del commit al que se vuelve (rollback)
+        if: inputs.sha != ''
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          # Falla antes de tocar la EC2 si ECR ya no tiene las imágenes de ese commit.
+          for service in master connector; do
+            FOUND=$(aws ecr batch-get-image --repository-name "energyshark-$service" \
+              --image-ids imageTag="$SHA" --query 'length(images)' --output text)
+            if [ "$FOUND" != "1" ]; then
+              echo "ECR no tiene energyshark-$service:$SHA (guarda las últimas 10 imágenes)"
+              exit 1
+            fi
+          done
+          echo "MASTER_IMAGE=$REGISTRY/energyshark-master:$SHA" >> "$GITHUB_ENV"
+          echo "CONNECTOR_IMAGE=$REGISTRY/energyshark-connector:$SHA" >> "$GITHUB_ENV"
+
       - name: Deploy en EC2 vía SSM
         run: |
-          # El compose y la config de Nginx viajan dentro del comando para que la EC2 siempre
-          # use los de este commit.
-          # Las réplicas de master se actualizan de a una y se espera a que cada una quede
-          # healthy antes de tocar la otra: Nginx siempre tiene una a la que enviar tráfico.
-          # El último `up` levanta connector y elimina contenedores huérfanos.
-          COMPOSE_B64=$(base64 -w0 deploy/docker-compose.prod.yml)
-          NGINX_B64=$(base64 -w0 deploy/nginx/energyshark-tls.conf)
-          COMPOSE="docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml"
-          SITE=/etc/nginx/sites-available/energyshark
+          # El compose, la config de Nginx y el script de deploy viajan dentro del comando
+          # para que la EC2 siempre use los de este commit. deploy/remote-deploy.sh hace el
+          # reinicio escalonado y vuelve solo a la versión anterior si la nueva no queda
+          # healthy.
           jq -n \
-            --arg compose_b64 "$COMPOSE_B64" \
-            --arg nginx_b64 "$NGINX_B64" \
-            --arg site "$SITE" \
+            --arg compose_b64 "$(base64 -w0 deploy/docker-compose.prod.yml)" \
+            --arg nginx_b64 "$(base64 -w0 deploy/nginx/energyshark-tls.conf)" \
+            --arg script_b64 "$(base64 -w0 deploy/remote-deploy.sh)" \
             --arg master "$MASTER_IMAGE" \
             --arg connector "$CONNECTOR_IMAGE" \
-            --arg compose "$COMPOSE" \
             '{commands: [
               "set -eu",
               "cd /opt/energyshark",
-              "test -f .env || { echo \"falta /opt/energyshark/.env\"; exit 1; }",
-              "echo \($compose_b64) | base64 -d > docker-compose.prod.yml",
-              "echo MASTER_IMAGE=\($master) > release.env",
-              "echo CONNECTOR_IMAGE=\($connector) >> release.env",
-              "\($compose) pull",
-              "\($compose) up -d --no-deps --wait --wait-timeout 120 postgres",
-              "\($compose) up -d --no-deps --wait --wait-timeout 120 master-1",
-              "\($compose) up -d --no-deps --wait --wait-timeout 120 master-2",
-              "\($compose) up -d --remove-orphans --wait --wait-timeout 180",
-              "echo \($nginx_b64) | base64 -d > /tmp/energyshark-nginx.conf",
-              "if ! cmp -s /tmp/energyshark-nginx.conf \($site); then cp \($site) \($site).prev; cp /tmp/energyshark-nginx.conf \($site); if nginx -t; then systemctl reload nginx; echo \"nginx actualizado\"; else cp \($site).prev \($site); echo \"nginx -t fallo: config anterior restaurada\"; exit 1; fi; else echo \"nginx sin cambios\"; fi",
-              "docker image prune -f"
+              "echo \($compose_b64) | base64 -d > docker-compose.prod.yml.new",
+              "echo \($nginx_b64) | base64 -d > energyshark-nginx.conf.new",
+              "echo \($script_b64) | base64 -d > remote-deploy.sh",
+              "bash remote-deploy.sh \($master) \($connector)"
             ]}' > commands.json
 
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "deploy ${GITHUB_SHA::7}" \
+            --comment "deploy ${MASTER_IMAGE##*:}" \
             --parameters file://commands.json \
             --query Command.CommandId --output text)
 
-          # Espera hasta ~8 minutos; el waiter de la CLI se rinde antes de que termine un pull lento,
-          # y el reinicio escalonado suma cerca de un minuto.
-          for _ in $(seq 1 96); do
+          # Espera hasta ~12 minutos: un pull lento, el reinicio escalonado y, si la versión
+          # nueva falla, el rollback (que vuelve a esperar a que todo quede healthy).
+          for _ in $(seq 1 144); do
             STATUS=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" \
               --instance-id "$EC2_INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
             case "$STATUS" in Pending|InProgress|Delayed) sleep 5 ;; *) break ;; esac
