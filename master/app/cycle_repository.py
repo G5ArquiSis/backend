@@ -46,6 +46,14 @@ from app.models import (
     OutboxMessage,
     WalletBalance,  # para consultar los saldos oficiales que tiene la wallet
 )
+from app.outbox import (
+    CENTRAL,
+    CITY,
+    MARKET_OFFER,
+    Destination,
+    DestinationType,
+    enqueue_publish,
+)
 
 PENDING = "pending"
 CONFIRMED = "confirmed"
@@ -870,11 +878,7 @@ async def _negotiation_by_attempt(session: AsyncSession, msg_id: str) -> Negotia
 
 
 async def _enqueue(session: AsyncSession, dedupe_key: str, payload: dict) -> None:
-    await session.execute(
-        postgres_insert(OutboxMessage)
-        .values(dedupe_key=dedupe_key, payload=payload)
-        .on_conflict_do_nothing(index_elements=["dedupe_key"])
-    )
+    await enqueue_publish(session, dedupe_key, payload, Destination.CENTRAL)
 
 
 def _proposal_envelope(negotiation: Negotiation, now: datetime, settings: Settings) -> dict:

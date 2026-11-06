@@ -157,10 +157,15 @@ class Negotiation(Base):
 
 
 class OutboxMessage(Base):
-    """Un mensaje por publicar a la central, que connector retira y envía.
+    """Un mensaje por publicar a la central, al mercado o a otra ciudad, que connector retira y envía.
 
     `dedupe_key` es único: dos réplicas de master que decidan lo mismo a la vez
-    (enviar el reporte de un ciclo, reintentar una propuesta) dejan una sola fila.
+    (enviar el reporte de un ciclo, reintentar una propuesta, publicar una oferta)
+    dejan una sola fila.
+
+    En la Hora 0 (Tarea A0) se define el contrato interno I1 con soporte para
+    destination ∈ {CENTRAL, MARKET_OFFER, CITY(code)}. Las columnas `exchange`
+    y `routing_key` se migran en la base de datos en la Tarea A4 (vía migraciones).
     """
 
     __tablename__ = "outbox"
