@@ -59,6 +59,9 @@ class WalletClient:
     El resultado final de la transaccion llega despues como un evento a la cola city.code
     """
 
+    _shared_limiters: dict[tuple[str, str],
+                           tuple[RateLimiter, RateLimiter]] = {}
+
     def __init__(self, base_url: str, api_key: str, *, transport=None,
                  timeout: float = 20.0, max_attempts: int = 4,
                  hook: Callable[[str, str, int | None, float], None] | None = None):
@@ -166,7 +169,7 @@ class WalletClient:
 
     # lecturas de la wallet (no requieren idempotency key, no retienen nada, no generan eventos):
 
-    async def get_swap_id(self, swap_id: str):
+    async def get_swap(self, swap_id: str):
 
         # se muestra el estado del swap: accepted, proposed, settled, cancelled,
         # expired, rejected, y el último evento.
@@ -175,6 +178,8 @@ class WalletClient:
         # (quien tiene el swapId), en el instante de la lectura, nunca los de otra ciudad.
 
         return await self._request('GET', f'swaps/{swap_id}')
+
+    get_swap_id = get_swap
 
     async def get_balance(self):
 

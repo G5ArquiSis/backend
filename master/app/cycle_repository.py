@@ -45,7 +45,7 @@ from app.models import (
     Negotiation,
     OutboxMessage,
     WalletBalance,  # para consultar los saldos oficiales que tiene la wallet
-    )
+)
 
 PENDING = "pending"
 CONFIRMED = "confirmed"
@@ -337,7 +337,8 @@ async def _apply_rejection(
 ) -> str:
     """`error` o `nack` de la central sobre una propuesta o un reporte nuestros."""
     target = message["data"]["target"]
-    reason = message.get("reason") or message["type"].upper()
+    reason = (message.get("reason") or message["data"].get("reason") or message["type"].upper()
+              )
 
     negotiation = await _negotiation_by_attempt(session, target)
     if negotiation is not None:
@@ -951,4 +952,4 @@ def _number(value: Decimal) -> int | float:
 
 
 # Los handlers v3 se registran desde su propio módulo; no se edita el diccionario E1.
-from app.wallet import events as _wallet_handlers  # noqa: E402,F401
+from app.wallet import eventos as _wallet_handlers  # noqa: E402,F401

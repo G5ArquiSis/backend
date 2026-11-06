@@ -49,16 +49,12 @@ SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
 
 
-@router.post("/negotiations", response_model=NegotiationOut, status_code=status.HTTP_201_CREATED)
+@router.post("/negotiations", status_code=status.HTTP_410_GONE)
 async def propose_negotiation(
     proposal: NegotiationIn, session: SessionDependency, settings: SettingsDependency
 ) -> NegotiationOut:
-    """Crea una propuesta para el ciclo abierto; se publica a la central en segundos.
-
-    Responde 409 con el motivo si no hay ventana abierta, si el precio supera el
-    tope o si un `give` excede la energía vendible.
-    """
-    # se debe responder con un ack y luego con error 410
+    """El protocolo v3 retira la creación HTTP de negociaciones E1."""
+    # se debe responder con un error 410
     raise HTTPException(
         status_code=410, detail="negotiation-proposal retirado en el protocolo v3")
 
@@ -153,7 +149,7 @@ async def read_cycle(cycle_id: str, session: SessionDependency) -> CycleDetail:
         wallet_events=[event.payload for event in wallet_events],
         wallet_statement=[asiento.payload for asiento in statement],
         market_messages=[],  # esto debe ser definido por los roles C y D
-        reconciliation=await latest_reconciliation(session),
+        reconciliation=await latest_reconciliation(session, cycle_id),
     )
 
 

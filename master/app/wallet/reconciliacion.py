@@ -16,8 +16,20 @@ def valor_decimal(value):
 
 
 def copia_saldos_local(diccionario_saldos):
-    return {asset: {"available": str(row.available), "held": str(row.held)}
-            for asset, row in diccionario_saldos.items()}
+    return {
+        asset: (
+            {
+                "available": str(row.available),
+                "held": str(row.held),
+            }
+            if row is not None
+            else {
+                "available": "0",
+                "held": "0",
+            }
+        )
+        for asset, row in diccionario_saldos.items()
+    }
 
 
 def calcular_delta(saldos_wallet, saldos_local):
@@ -119,10 +131,15 @@ async def reconcile(session, client, *, cycle_id=None, max_pages=30):
 # se incluye cuándo se ejecutó, qué diferencias se encontraron y cuántos asientos nuevos
 # se importaron.
 
-async def latest_reconciliation(session):
+async def latest_reconciliation(session, cycle_id=None):
 
-    ultima_rec = await session.execute(select(WalletReconciliacion)
-                                       .order_by(WalletReconciliacion.id.desc()).limit(1))
+    query = select(WalletReconciliacion)
+    if cycle_id is not None:
+        query = query.where(WalletReconciliacion.cycle_id == cycle_id)
+
+    ultima_rec = await session.execute(
+        query.order_by(WalletReconciliacion.id.desc()).limit(1)
+    )
 
     row = ultima_rec.scalar_one_or_none()
     if row is None:
