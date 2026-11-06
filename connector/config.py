@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     central_routing_key: str = "central"
     # Cada cuánto se le pide a master lo pendiente por publicar. Es el reloj del ciclo.
     outbox_poll_seconds: float = 5
+    # Flag de la E2: consumo de market.{CODE} y publicación al exchange market.
+    # Entra apagado para que un merge a main no cambie el comportamiento en producción.
+    market_enabled: bool = False
 
     master_events_url: str
     master_http_timeout_seconds: float = 10

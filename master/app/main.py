@@ -5,14 +5,20 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.database import create_schema
+from app.database import create_schema, engine
+from app.migrations import run_migrations
 from app.routers import health, history, internal, negotiations
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Prepara el esquema de la base antes de que el servicio acepte tráfico."""
+    """Prepara el esquema de la base antes de que el servicio acepte tráfico.
+
+    Primero `create_all` crea las tablas que falten; después las migraciones alteran
+    las que ya existían (ver app/migrations).
+    """
     await create_schema()
+    await run_migrations(engine)
     yield
 
 

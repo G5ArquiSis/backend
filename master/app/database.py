@@ -20,6 +20,8 @@ from app.models import Base
 # este módulo la ensambla una vez y el resto de la app solo pide sesiones.
 _engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
 _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+# Expuesto para las migraciones, que necesitan una conexión propia y no una sesión.
+engine = _engine
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
