@@ -337,9 +337,6 @@ async def apply_swap_proposed(
     if operation_idpk is not None and not isinstance(operation_idpk, str):
         raise ValueError("data.idpk debe ser texto")
 
-    if not isinstance(token, str) or not token.strip():
-        raise ValueError("swap-proposed requiere data.token")
-
     # La operación original se identifica mediante el idpk del bid.
     conditions = [SellerBid.swap_id == swap_id]
     if operation_idpk:
@@ -406,6 +403,11 @@ async def apply_swap_proposed(
     # Un evento tardío no debe reactivar un bid que ya terminó.
     if bid.status not in {"reserved", "wallet_error", "proposed"}:
         return
+
+    # El token solo es obligatorio cuando el swap corresponde
+    # a uno de nuestros bids y debemos notificar su aceptación.
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("swap-proposed requiere data.token")
 
     bid.status = "proposed"
 
