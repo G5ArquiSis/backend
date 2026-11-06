@@ -207,6 +207,72 @@ def mensaje(
     return cuerpo
 
 
+def status_statement(
+    ciclo: str,
+    *,
+    mercado: float,
+    cierre: float,
+    generacion: float = 26000,
+    consumo: float = 13000,
+    min_bid: int = 10,
+) -> dict:
+    """Status-statement v3 con los tiempos comprimidos: el mercado abre ahora y dura `mercado`
+    segundos, y el periodo de cierre (`reportOpensAt` → `validUntil`) dura `cierre`. Mismas
+    proporciones que el ciclo real (8:30/9:00/10:00 de mercado)."""
+    sellable = int(max(0, generacion - consumo))
+    return mensaje(
+        "status-statement",
+        {
+            "energy": {
+                "generationCapacity": generacion,
+                "consumption": consumo,
+                "generationCost": 43.2,
+                "sellable": sellable,
+            },
+            "market": {
+                "buybackPrice": 45.36,
+                "imbalancePrice": 735,
+                "minBid": min_bid,
+                "opensAt": en(0),
+                "lastOfferAt": en(mercado * 0.85),
+                "lastBidAt": en(mercado * 0.9),
+                "closesAt": en(mercado),
+                "reportOpensAt": en(mercado),
+                "limits": {
+                    "marketOpsPerMinute": 60,
+                    "walletWritesPerMinute": 120,
+                    "walletReadsPerMinute": 300,
+                },
+            },
+            "validUntil": en(mercado + cierre),
+        },
+        ciclo=ciclo,
+    )
+
+
+def ciclo_nuevo(prefijo: str) -> str:
+    """Un ciclo propio del ensayo, también como ciclo de la wallet falsa."""
+    ciclo = f"cycle-{prefijo}-{int(time.time())}"
+    wallet_admin("POST", "/cycle", {"cycleId": ciclo})
+    return ciclo
+
+
+def esperar_reporte(central: Broker, ciclo: str, segundos: float) -> list[dict]:
+    """Todos los negotiation-report de `ciclo` que lleguen a `central.q` en ese plazo."""
+    reportes = []
+    limite = time.monotonic() + segundos
+    while (restante := limite - time.monotonic()) > 0:
+        reporte = central.leer(
+            "central.q",
+            restante,
+            lambda m: m.get("type") == "negotiation-report" and m.get("cycleId") == ciclo,
+        )
+        if reporte is None:
+            break
+        reportes.append(reporte)
+    return reportes
+
+
 def ciclo_actual() -> str:
     """El ciclo que la wallet falsa usa para sus eventos, o uno de ensayo si no tiene."""
     status, body = wallet_admin("GET", "/state")

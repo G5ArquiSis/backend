@@ -159,3 +159,40 @@ class Contraparte:
 
     def aceptar_swap(self, swap_id: str) -> tuple[int, object]:
         return local.wallet_v1("POST", f"/swaps/{swap_id}/accept", CIUDAD)
+
+
+def verificar_token(
+    token: str, *, swap_id: str, vendedor: str, cantidad: int, monto: Decimal, offer_id: str
+) -> list[str]:
+    """Las seis verificaciones del comprador antes de aceptar (enunciado E2 § Token).
+    Devuelve los problemas encontrados; vacío si el token es aceptable."""
+    import jwt
+
+    status, jwks = local.http("GET", f"{local.WALLET}/.well-known/jwks.json")
+    if status != 200:
+        return [f"JWKS no disponible ({status})"]
+    try:
+        kid = jwt.get_unverified_header(token).get("kid")
+        clave = next(k for k in jwks["keys"] if k.get("kid") == kid)
+        claims = jwt.decode(
+            token, jwt.PyJWK(clave).key, algorithms=["ES256"], options={"verify_aud": False}
+        )
+    except StopIteration:
+        return ["el kid del token no está en el JWKS"]
+    except jwt.PyJWTError as error:
+        return [f"firma o exp inválidos: {error}"]
+    problemas = []
+    if claims.get("sub") != swap_id:
+        problemas.append(f"sub {claims.get('sub')} no es el swapId {swap_id}")
+    if claims.get("proposer") != vendedor:
+        problemas.append(f"proposer {claims.get('proposer')} no es {vendedor}")
+    if claims.get("give") != {"asset": "KWH", "amount": cantidad}:
+        problemas.append(f"give {claims.get('give')} no son {cantidad} KWH")
+    if (
+        Decimal(str(claims.get("take", {}).get("amount"))) != monto
+        or claims.get("take", {}).get("asset") != "CR"
+    ):
+        problemas.append(f"take {claims.get('take')} no son {monto} CR")
+    if claims.get("memo") != offer_id:
+        problemas.append(f"memo {claims.get('memo')} no es {offer_id}")
+    return problemas

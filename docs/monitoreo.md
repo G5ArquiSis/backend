@@ -94,10 +94,45 @@ Ciclos, Mercado, Wallet e Infraestructura.
 **Alertas** (*Alerts → Alert conditions → New NRQL condition*). Se crean **después** del deploy
 que trae estos eventos, porque sin datos las de pérdida de señal se disparan:
 
+Todas filtran por `appName = 'EnergyShark E1'` (el `NEW_RELIC_APP_NAME` de producción), para que
+un ensayo local con la license key no las dispare.
+
 | Alerta | NRQL | Umbral |
 |---|---|---|
-| Ciclo sin reporte (G03) | `SELECT count(*) FROM CycleClosed WHERE owedReport IS TRUE AND reportSent IS FALSE` | > 0 al menos una vez en 5 min |
-| Reloj detenido (guardián del ciclo) | `SELECT count(*) FROM CycleClosed` | Pérdida de señal tras 45 min (dos ciclos) |
+| Ciclo sin reporte (G03, guardián) | `SELECT count(*) FROM CycleClosed WHERE appName = 'EnergyShark E1' AND owedReport IS TRUE AND reportSent IS FALSE` | > 0 al menos una vez en 5 min |
+| Reloj detenido (guardián) | `SELECT count(*) FROM CycleClosed WHERE appName = 'EnergyShark E1'` | Pérdida de señal tras 45 min (dos ciclos) |
+| Connector no late (guardián) | `SELECT count(*) FROM ContainerSample WHERE name = 'energyshark-e1-connector-1' AND status NOT LIKE '%(healthy)%'` | > 0 en todas las ventanas durante 5 min. Además, pérdida de señal tras 10 min (el contenedor desapareció) |
 | Feed del mercado detenido | `SELECT count(*) FROM InboundMessage WHERE feed = 'market'` | Pérdida de señal tras 10 min. Activarla sólo con `MARKET_ENABLED=true` |
 | Wallet fallando | `SELECT percentage(count(*), WHERE outcome != 'ok') FROM WalletCall` | > 20 % durante 5 min |
 | Wallet lenta | `SELECT percentile(durationMs, 95) FROM WalletCall` | > 5000 ms durante 5 min |
+
+### Guardián de ciclos (E6)
+
+master no tiene temporizadores: si connector deja de llamar a `/internal/outbox/claim`, no sale
+el reporte y tampoco se registra `CycleClosed`. Por eso el guardián son tres alertas que se
+cubren entre sí, evaluadas por New Relic (no dependen de nuestro stack):
+
+- **Ciclo sin reporte:** el ciclo cerró, la central nos debía reporte (hubo status-statement)
+  y no salió.
+- **Reloj detenido:** no hay `CycleClosed` en dos ciclos. Cubre el caso en que el problema es
+  justamente el reloj: connector caído, master caído o la base inaccesible.
+- **Connector no late:** el healthcheck de connector (`heartbeat.py`: cada consumidor esperado
+  late) deja de estar `healthy`. Llega antes que las otras dos, sin esperar al cierre del ciclo.
+
+En `ContainerSample` no existe `healthStatus`: la salud de Docker viene en `status`, con la forma
+`Up 53 minutes (healthy)`. Durante un deploy connector pasa unos segundos por
+`(health: starting)`; por eso el umbral exige 5 minutos seguidos.
+
+**Cómo probarlo sin tocar producción:** stack local con la license key y otro nombre de app
+(`NEW_RELIC_APP_NAME=EnergyShark ensayo`), y una copia de las dos primeras condiciones con
+`appName = 'EnergyShark ensayo'`. Después:
+
+```bash
+python3 scripts/ensayo_caida_contenedor.py --perder-reporte
+```
+
+El script mata master y connector antes del plazo del reporte y los levanta después de que la
+ventana cerró: el ciclo queda sin reporte (`GET /cycles/{id}` con `reportSentAt` nulo) y
+`CycleClosed` llega con `reportSent` false. La condición de prueba debe abrir un incidente en
+≤ 5 min. Mientras están abajo, sin `CycleClosed` ni claims, el dashboard muestra el reloj
+detenido. Borrar las condiciones de prueba al terminar.

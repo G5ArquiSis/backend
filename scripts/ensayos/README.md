@@ -37,6 +37,14 @@ credenciales son las de `scripts/fake_wallet/rabbitmq/definitions.json` y sólo 
 | 6 | Ruta deshabilitada | `demo_anomalia_6.py` | Distance-table con la ruta TAL→HGW habilitada, y a mitad del mercado una nueva con `enabled: false`. Comprueba `/connectivity` y muestra si TAL sigue pujando, con el precio efectivo antes y después |
 | 7 | Lectura del monitoreo | `demo_anomalia_7.py [--segundos 4 --minutos 3]` | Wallet lenta (falla `latency`) mientras master reconcilia contra ella; imprime qué mirar en New Relic y las consultas NRQL |
 
+## Pruebas de punta a punta y guardián (E6)
+
+| Script | Qué hace |
+|---|---|
+| `escenario_e2e.py [--levantar] [--tal-compra]` | Comando único: levanta el stack y recorre un ciclo comprimido: status-statement y distance-table → oferta → bid → swap → token verificado → aceptación → `swap-settled` → `offer-updated` → `negotiation-report` |
+| `ensayo_caida_contenedor.py` | Mata master y connector justo antes del plazo del reporte y los levanta: el reporte pendiente sale una vez, con el mismo idpk |
+| `ensayo_caida_contenedor.py --perder-reporte` | Los deja abajo hasta que cierra la ventana: el ciclo queda sin reporte. Con la license key local, prueba la alerta "Ciclo sin reporte" del guardián (`docs/monitoreo.md` § Guardián de ciclos) |
+
 Todos aceptan `--help`. Las esperas largas (`--espera`, `--espera-oferta`) existen porque TAL
 ofrece o puja según su estrategia y el momento del ciclo.
 
@@ -50,6 +58,8 @@ ofrece o puja según su estrategia y el momento del ciclo.
 | 5 | ✓ en los dos modos | — |
 | 6 | ✓ `/connectivity` refleja el cambio; no hay pujas de TAL que observar | Estrategia de compra (D) para ver la selección |
 | 7 | ✓ las reconciliaciones tardan lo inyectado y master sigue respondiendo | Correrlo con la license key para verlo en New Relic |
+| E2E | ✓ status-statement, distance-table y reporte; ✗ TAL no ofrece ni puja | Estrategia (C y D) y tipos v3 en connector (PR #28) |
+| Caída | ✓ en los dos modos: el reporte sale una vez tras el reinicio, y sin reporte el cierre queda registrado para `CycleClosed` | — |
 
 La contraparte se probó sola (HGW ofrece, recibe un bid, propone, manda `bid-accepted` y el
 swap se liquida en la wallet falsa), y todos los mensajes que arman los scripts cumplen los
