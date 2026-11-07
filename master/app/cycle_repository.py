@@ -851,11 +851,19 @@ async def record_unapplied_message(
     """
     envelope = _parse_envelope(raw_content)
 
-    resolved_city = sender_city or _text_or_none(envelope.get("cityId")) or _text_or_none(envelope.get("sender"))
+    resolved_city = (
+        sender_city
+        or _text_or_none(envelope.get("cityId"))
+        or _text_or_none(envelope.get("sender"))
+    )
     if not resolved_city and isinstance(envelope.get("data"), dict):
         resolved_city = _text_or_none(envelope.get("data", {}).get("cityId"))
 
-    resolved_user_id = sender_user_id or _text_or_none(envelope.get("userId")) or _text_or_none(envelope.get("user_id"))
+    resolved_user_id = (
+        sender_user_id
+        or _text_or_none(envelope.get("userId"))
+        or _text_or_none(envelope.get("user_id"))
+    )
 
     entry = MessageLog(
         category=category,
@@ -883,7 +891,7 @@ async def list_message_log(
     limit: int = 25,
     offset: int = 0,
 ) -> Sequence[MessageLog]:
-    """Registro de mensajes no aplicados, del más reciente al más antiguo, con filtros y paginación."""
+    """Registro de mensajes no aplicados con filtros y paginación."""
     statement = select(MessageLog)
     conditions = _build_message_log_filters(category, city_id, message_type, from_date, to_date)
     if conditions:

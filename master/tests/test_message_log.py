@@ -8,22 +8,18 @@ import pytest
 
 from app.cycle_repository import (
     _build_message_log_filters,
-    count_message_log,
     get_message_log_counts,
-    list_message_log,
     record_unapplied_message,
 )
 from app.cycle_schemas import (
     MessageLogCounts,
     MessageLogEntry,
     MessageLogPage,
-    UnappliedMessageIn,
 )
-from app.models import MessageLog
 
 
 def test_message_log_schema_with_sender_and_counts() -> None:
-    """Verifica que MessageLogEntry y MessageLogPage incluyan los campos de ciudad, usuario y contadores."""
+    """Verifica los campos de ciudad, usuario y contadores en el schema."""
     now = datetime(2026, 11, 7, 12, 0, 0, tzinfo=UTC)
     entry = MessageLogEntry(
         id=1,
@@ -68,7 +64,7 @@ def test_build_message_log_filters_generates_expected_conditions() -> None:
 
 @pytest.mark.asyncio
 async def test_record_unapplied_message_extracts_sender_and_user_id() -> None:
-    """Verifica que record_unapplied_message extraiga la ciudad y user_id de envelope o argumentos."""
+    """Verifica extracción de ciudad y user_id de envelope o argumentos."""
     mock_session = AsyncMock()
 
     body = {
