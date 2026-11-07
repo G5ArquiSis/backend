@@ -5,13 +5,14 @@ Qué debe verse (enunciado E2 § Demo): el ledger no cambia dos veces, no se pro
 swap y el duplicado queda registrado (RF05, `GET /message-log`).
 
     --tipo swap-settled (por omisión)
-        Se liquida un swap real en la wallet falsa: HGW entrega kWh y TAL los paga. TAL acepta
-        directo en la wallet, sin pasar por su nodo, así el ensayo no depende de la estrategia.
-        El `swap-settled` le llega a TAL por `city.TAL.q`, y el script lo reenvía como la
-        central: mismo idpk, msgId nuevo.
+        Se liquida un swap real por el mercado, en un ciclo en que TAL tiene déficit: HGW
+        ofrece, TAL puja, HGW propone el swap y TAL lo verifica y acepta. Así el swap queda
+        asociado al ciclo. El `swap-settled` le llega a TAL por `city.TAL.q`, y el script lo
+        reenvía como la central: mismo idpk, msgId nuevo.
     --tipo bid
-        TAL vende: HGW lee la oferta de TAL en el feed, manda un bid y lo reenvía con el mismo
-        idpk. Debe haber una sola propuesta de swap en la wallet y la misma respuesta.
+        TAL vende (ciclo con excedente): HGW lee la oferta de TAL en el feed, manda un bid y lo
+        reenvía con el mismo idpk. Debe haber una sola propuesta de swap en la wallet y la misma
+        respuesta.
 
 Reemplaza la versión de la E1 (demand-statement por HTTP, retirado en v3), que partió del
 script de Vicente Pavez (PR #17).
@@ -27,31 +28,26 @@ import argparse
 import json
 import time
 import uuid
+from decimal import Decimal
 
 from ensayos import local
 from ensayos.contraparte import Contraparte
 
 
-def duplicar_swap_settled(r: local.Resultado, ciclo: str) -> None:
-    r.paso("Swap real HGW → TAL en la wallet falsa (10 kWh por 3 300 CR)")
-    local.wallet_admin("POST", "/market", {"kwhEnabled": True})
-    status, propuesta = local.wallet_v1(
-        "POST",
-        "/swaps",
-        "HGW",
-        {
-            "give": {"asset": "KWH", "amount": 10},
-            "take": {"asset": "CR", "amount": 3300},
-            "expiresAt": local.en(40),
-            "memo": f"ensayo-anomalia-1-{ciclo}",
-        },
-    )
-    if not r.chequeo(status == 202, "HGW propone el swap", f"{status}"):
+def duplicar_swap_settled(r: local.Resultado, hgw: Contraparte) -> None:
+    precio = Decimal("50")
+    r.paso("Swap real por el mercado: HGW ofrece 5 000 kWh a 50 y TAL compra")
+    oferta = hgw.ofrecer(5000, precio)
+    bid = hgw.esperar_bid(60, oferta["data"]["offerId"])
+    if not r.chequeo(
+        bid is not None, "TAL puja por la oferta de HGW", "¿déficit y mercado abierto?"
+    ):
         return
-    swap_id = propuesta["swapId"]
-    local.esperar(lambda: local.wallet_events("HGW", "swap-proposed"), 5)
-    status, _ = local.wallet_v1("POST", f"/swaps/{swap_id}/accept", "TAL")
-    r.chequeo(status == 202, "TAL acepta en la wallet", f"swapId {swap_id}")
+    hgw.acusar_recibo(bid)
+    swap = hgw.proponer_swap(bid, precio)
+    hgw.aceptar_bid(bid, precio, swap)
+    swap_id = swap["swapId"]
+    r.info(f"HGW propone {swap_id}; TAL verifica el token y acepta")
 
     liquidado = local.esperar(
         lambda: next(
@@ -62,7 +58,7 @@ def duplicar_swap_settled(r: local.Resultado, ciclo: str) -> None:
             ),
             None,
         ),
-        10,
+        30,
     )
     if not r.chequeo(liquidado is not None, "la wallet emite swap-settled a TAL"):
         return
@@ -93,53 +89,54 @@ def duplicar_swap_settled(r: local.Resultado, ciclo: str) -> None:
     verificar_registro(r, liquidado["idpk"])
     despues = local.wallet_admin("GET", "/state")[1]["balances"]["TAL"]
     r.chequeo(antes == despues, "la wallet no cambió (no hubo un segundo movimiento)")
-    detalle_ciclo(r, ciclo, liquidado["idpk"])
+    detalle_ciclo(r, hgw.ciclo, liquidado["idpk"])
 
 
-def duplicar_bid(r: local.Resultado, ciclo: str, espera: float) -> None:
-    hgw = Contraparte(ciclo)
-    try:
-        hgw.vaciar()
-        r.paso(f"HGW espera la oferta de TAL en el feed (hasta {espera:.0f} s)")
-        oferta = hgw.esperar_oferta("TAL", espera)
-        if not r.chequeo(
-            oferta is not None, "TAL publicó una oferta", "¿hay excedente y mercado abierto?"
-        ):
-            return
-        offer_id = oferta["data"]["offerId"]
-        cantidad = max(1, min(100, int(oferta["data"]["quantity"])))
-        r.info(
-            f"oferta {offer_id}: {oferta['data']['quantity']} kWh a "
-            f"{oferta['data']['pricePerEnergy']}"
-        )
+def duplicar_bid(r: local.Resultado, hgw: Contraparte, espera: float) -> None:
+    r.paso(f"HGW espera la oferta de TAL en el feed (hasta {espera:.0f} s)")
+    oferta = hgw.esperar_oferta("TAL", espera)
+    if not r.chequeo(
+        oferta is not None, "TAL publicó una oferta", "¿hay excedente y mercado abierto?"
+    ):
+        return
+    offer_id = oferta["data"]["offerId"]
+    cantidad = max(1, min(100, int(oferta["data"]["quantity"])))
+    r.info(
+        f"oferta {offer_id}: {oferta['data']['quantity']} kWh a {oferta['data']['pricePerEnergy']}"
+    )
 
-        r.paso(f"HGW manda un bid de {cantidad} kWh y lo reenvía con el mismo idpk")
-        primero = hgw.pujar("TAL", offer_id, cantidad)
-        respuesta_1 = hgw.esperar_respuesta(primero, 15)
-        segundo = hgw.pujar("TAL", offer_id, cantidad, idpk=primero["idpk"])
-        respuesta_2 = hgw.esperar_respuesta(segundo, 15)
-        tipo_1 = respuesta_1 and respuesta_1["type"]
-        tipo_2 = respuesta_2 and respuesta_2["type"]
-        r.chequeo(tipo_1 is not None, "TAL responde el primer bid", str(tipo_1))
-        r.chequeo(tipo_1 == tipo_2, "el reenvío recibe la misma respuesta", f"{tipo_1} / {tipo_2}")
-        if tipo_1 == "bid-accepted" and tipo_2 == "bid-accepted":
-            r.chequeo(
-                respuesta_1["data"]["swapId"] == respuesta_2["data"]["swapId"],
-                "las dos respuestas apuntan al mismo swap",
-            )
-        propuestas = [
-            s
-            for s in local.wallet_admin("GET", "/state")[1]["swaps"]
-            if s["proposer"] == "TAL" and s["memo"] == offer_id
-        ]
+    r.paso(f"HGW manda un bid de {cantidad} kWh y lo reenvía con el mismo idpk")
+    primero = hgw.pujar("TAL", offer_id, cantidad)
+    respuesta_1 = hgw.esperar_respuesta(primero, 15)
+    segundo = hgw.pujar("TAL", offer_id, cantidad, idpk=primero["idpk"])
+    respuesta_2 = hgw.esperar_respuesta(segundo, 15)
+    tipo_1 = respuesta_1 and respuesta_1["type"]
+    tipo_2 = respuesta_2 and respuesta_2["type"]
+    r.chequeo(tipo_1 is not None, "TAL responde el primer bid", str(tipo_1))
+    # El enunciado pide que el duplicado no se re-aplique ni proponga un segundo swap; no exige
+    # repetir la respuesta. TAL puede no contestarlo (lo registra como duplicado) o repetir la
+    # misma: lo que no puede es dar otra respuesta.
+    r.chequeo(
+        tipo_2 is None or tipo_2 == tipo_1,
+        "el reenvío no recibe una respuesta distinta",
+        f"{tipo_1} / {tipo_2 or 'sin respuesta: duplicado no re-aplicado'}",
+    )
+    if tipo_1 == "bid-accepted" and tipo_2 == "bid-accepted":
         r.chequeo(
-            len(propuestas) <= 1,
-            "TAL propuso un solo swap para ese bid",
-            f"{len(propuestas)} propuestas con memo {offer_id}",
+            respuesta_1["data"]["swapId"] == respuesta_2["data"]["swapId"],
+            "las dos respuestas apuntan al mismo swap",
         )
-        verificar_registro(r, primero["idpk"])
-    finally:
-        hgw.cerrar()
+    propuestas = [
+        s
+        for s in local.wallet_admin("GET", "/state")[1]["swaps"]
+        if s["proposer"] == "TAL" and s["memo"] == offer_id
+    ]
+    r.chequeo(
+        len(propuestas) <= 1,
+        "TAL propuso un solo swap para ese bid",
+        f"{len(propuestas)} propuestas con memo {offer_id}",
+    )
+    verificar_registro(r, primero["idpk"])
 
 
 def verificar_registro(r: local.Resultado, idpk: str) -> None:
@@ -186,12 +183,23 @@ def main() -> None:
     local.exigir_local()
     r = local.Resultado("Anomalía 1")
     local.stack_arriba(r)
-    ciclo = local.ciclo_actual()
-    r.info(f"ciclo: {ciclo}")
-    if args.tipo == "swap-settled":
-        duplicar_swap_settled(r, ciclo)
-    else:
-        duplicar_bid(r, ciclo, args.espera_oferta)
+    local.wallet_admin("POST", "/market", {"kwhEnabled": True})
+    # HGW vacía sus colas antes de abrir el ciclo: después llega ahí la oferta o el bid de TAL.
+    hgw = Contraparte("")
+    central = local.Broker("central")
+    try:
+        hgw.vaciar()
+        if args.tipo == "swap-settled":
+            hgw.ciclo = local.mercado_comprador(central, "anomalia1")
+            r.info(f"ciclo: {hgw.ciclo}")
+            duplicar_swap_settled(r, hgw)
+        else:
+            hgw.ciclo = local.mercado_vendedor(central, "anomalia1")
+            r.info(f"ciclo: {hgw.ciclo}")
+            duplicar_bid(r, hgw, args.espera_oferta)
+    finally:
+        central.cerrar()
+        hgw.cerrar()
     r.terminar()
 
 

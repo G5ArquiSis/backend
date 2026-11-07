@@ -79,8 +79,9 @@ def test_identity_mismatch_with_wrong_user_id_emits_nack() -> None:
     assert nack["_target_routing_key"] == "city.ATTACKER"
 
 
-def test_identity_mismatch_without_user_id_is_discarded() -> None:
-    """A2: Un bid sin user_id AMQP se descarta y registra (no se sabe a quién responder)."""
+def test_identity_mismatch_without_user_id_is_nacked_to_claimed_city() -> None:
+    """A2: Un bid sin user_id AMQP recibe NACK IDENTITY_MISMATCH (referencia v3: un bid con
+    user_id ajeno o malformado recibe nack). Sin user_id, se responde a la ciudad que dice ser."""
     bid = {
         "idpk": "bid-idpk-2",
         "msgId": "msg-bid-2",
@@ -94,9 +95,97 @@ def test_identity_mismatch_without_user_id_is_discarded() -> None:
     message, nack, discard = validacion_mensaje_entrante(body, city_code="TAL", user_id=None)
 
     assert message is None
-    assert nack is None
-    assert discard is not None
-    assert "IDENTITY_MISMATCH" in discard
+    assert discard is None
+    assert nack is not None
+    assert nack["reason"] == "IDENTITY_MISMATCH"
+    assert nack["code"] == 403
+    assert nack["_target_routing_key"] == "city.COR"
+
+
+def test_without_user_id_and_invalid_city_code_is_discarded() -> None:
+    """Sin user_id y con un cityId que no es un código de ciudad no hay a quién responder."""
+    bid = {
+        "idpk": "bid-idpk-9",
+        "msgId": "msg-bid-9",
+        "type": "bid",
+        "timestamp": "2026-11-06T12:00:00Z",
+        "cityId": "no es ciudad",
+        "data": {"offerId": "TAL-1", "quantity": 500},
+    }
+
+    message, nack, discard = validacion_mensaje_entrante(
+        as_body(bid), city_code="TAL", user_id=None
+    )
+
+    assert (message, nack) == (None, None)
+    assert discard is not None and "IDENTITY_MISMATCH" in discard
+
+
+def test_malformed_bid_from_city_is_nacked_to_that_city() -> None:
+    """Un bid sin idpk de city.HGW recibe el NACK en city.HGW, no en la cola de la central."""
+    bid = {
+        "msgId": "msg-bid-10",
+        "type": "bid",
+        "timestamp": "2026-11-06T12:00:00Z",
+        "cityId": "HGW",
+        "data": {"offerId": "TAL-1", "quantity": 10},
+    }
+
+    message, nack, discard = validacion_mensaje_entrante(
+        as_body(bid), city_code="TAL", user_id="city.HGW"
+    )
+
+    assert (message, discard) == (None, None)
+    assert nack["reason"] == "MALFORMED_MESSAGE"
+    assert nack["_target_routing_key"] == "city.HGW"
+
+
+def test_malformed_message_from_central_is_nacked_to_central() -> None:
+    """Un mensaje de la central sin idpk se responde a la central, como antes."""
+    message_in = {
+        "msgId": "msg-central-1",
+        "type": "transfer",
+        "timestamp": "2026-11-06T12:00:00Z",
+        "sender": "central",
+        "data": {"quantity": 10},
+    }
+
+    message, nack, discard = validacion_mensaje_entrante(
+        as_body(message_in), city_code="TAL", user_id="central"
+    )
+
+    assert (message, discard) == (None, None)
+    assert nack["reason"] == "MALFORMED_MESSAGE"
+    assert "_target_routing_key" not in nack
+
+
+def test_bid_rejected_by_master_is_nacked_to_sender_city(master_with) -> None:
+    """Si master rechaza el contenido de un bid (422), el NACK va a city.{emisor}."""
+    recorder = RecordingMaster(
+        {"/internal/messages": httpx.Response(422, json={"detail": "quantity debe ser entero"})}
+    )
+    channel = FakeChannel()
+    bid = {
+        "idpk": "bid-idpk-11",
+        "msgId": "msg-bid-11",
+        "type": "bid",
+        "timestamp": "2026-11-06T12:00:00Z",
+        "cityId": "HGW",
+        "cycleId": "cycle-1",
+        "data": {"offerId": "TAL-1", "quantity": 10.5},
+    }
+
+    consumer.process_city_message(
+        channel,
+        as_body(bid),
+        master_with(recorder),
+        SETTINGS,
+        properties=DummyProperties("city.HGW"),
+    )
+
+    assert channel.routing_keys == ["city.HGW"]
+    assert channel.published[0]["type"] == "nack"
+    assert channel.published[0]["reason"] == "MALFORMED_MESSAGE"
 
 
 def test_valid_bid_with_matching_user_id_passes() -> None:

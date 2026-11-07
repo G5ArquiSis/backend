@@ -122,14 +122,23 @@ def main() -> None:
     r = local.Resultado("Anomalía 3")
     local.stack_arriba(r)
     local.wallet_admin("POST", "/market", {"kwhEnabled": True})
-    hgw = Contraparte(local.ciclo_actual())
+    # HGW vacía sus colas antes de abrir el ciclo: después llega ahí la oferta o el bid de TAL.
+    hgw = Contraparte("")
+    central = local.Broker("central")
     try:
         hgw.vaciar()
+        # Cada caso arma su ciclo: TAL con excedente (vende) o con déficit (compra).
+        if args.caso == "comprador-no-acepta":
+            hgw.ciclo = local.mercado_vendedor(central, "anomalia3")
+        else:
+            hgw.ciclo = local.mercado_comprador(central, "anomalia3")
+        r.info(f"ciclo: {hgw.ciclo}")
         if args.caso == "comprador-no-acepta":
             comprador_no_acepta(r, hgw, args.espera)
         else:
             vendedor_no_propone(r, hgw, args.precio, args.espera)
     finally:
+        central.cerrar()
         hgw.cerrar()
     r.terminar()
 
