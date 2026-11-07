@@ -228,6 +228,11 @@ async def ensure_offer_for_cycle(
     offer.buyback_price = buyback_price
     offer.imbalance_price = imbalance_price
 
+    # Congela la estrategia al recibir el status-statement del ciclo, incluso si
+    # no hay energía vendible. Un cambio posterior de configuración solo afecta
+    # al siguiente ciclo.
+    strategy = await get_active_strategy(cycle_id, session=session)
+
     if now >= last_offer_at:
         offer.reason = "LAST_OFFER_AT_PASSED"
         return offer
@@ -236,7 +241,6 @@ async def ensure_offer_for_cycle(
         offer.reason = "NO_SELLABLE_ENERGY"
         return offer
 
-    strategy = await get_active_strategy(cycle_id, session=session)
     quantity = calculate_offer_quantity(sellable, strategy)
     if quantity <= 0:
         offer.reason = "NO_SELLABLE_ENERGY"

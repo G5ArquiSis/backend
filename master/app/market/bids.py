@@ -12,7 +12,7 @@ que este handler reciba el mensaje.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.database import _session_factory
 from app.handler_registry import register_handler
 from app.market.models import SellerBid, SellerOffer
 from app.market.seller import ACTIVE, CLOSED
@@ -32,6 +33,10 @@ APPLIED = "applied"
 DUPLICATE = "duplicate"
 RESERVED = "reserved"
 REJECTED = "rejected"
+
+# Ventana breve para agrupar bids simultáneos antes de aplicar prioridad por cantidad.
+# Cubre el escenario de 40 ms definido en ADR-0004 sin esperar varios segundos.
+_BID_ARBITRATION_GRACE = timedelta(milliseconds=200)
 
 _REASON_CODES = {
     "QUANTITY_UNAVAILABLE": 409,
@@ -214,6 +219,14 @@ async def apply_bid_message(
     )
     bid = bid_result.scalar_one()
 
+    strategy = await get_active_strategy(cycle_id, session=session)
+    if strategy.bid_acceptance_policy == "largest_quantity_first":
+        # Esta política necesita observar el conjunto de bids pendientes para una
+        # oferta antes de reservar. El worker los ordena por cantidad descendente
+        # cuando connector consulta la outbox (cada pocos segundos).
+        bid.status = "pending"
+        return APPLIED
+
     # El identity check real corresponde a A2 (AMQP user_id contra cityId). Esta
     # comprobación adicional evita una autocompra incluso en pruebas o llamadas internas.
     if not settings.market_enabled:
@@ -287,21 +300,171 @@ async def apply_bid_message(
     if offer.price_per_energy is None:
         raise ValueError("la oferta activa no tiene price_per_energy")
 
-    strategy = await get_active_strategy(cycle_id, session=session)
-    if strategy.bid_acceptance_policy != "arrival_order":
-        # largest_quantity_first necesita arbitrar un conjunto de bids antes de
-        # reservar; no se simula esa política aceptando en orden de llegada. C5
-        # deberá habilitarla junto con su mecanismo de agrupación/prioridad.
-        raise ValueError(
-            "bid_acceptance_policy largest_quantity_first requiere arbitraje por lote (C5)"
-        )
-
     bid.status = RESERVED
     bid.price_per_energy = offer.price_per_energy
     bid.reserved_at = now
     offer.remaining = available - quantity
     offer.updated_at = now
     return APPLIED
+
+
+async def arbitrate_pending_bids(
+    session: AsyncSession,
+    now: datetime,
+    settings: Settings,
+    *,
+    max_offers: int = 100,
+) -> int:
+    """Arbitra bids en cola con la política inmutable del ciclo.
+
+    La política ``largest_quantity_first`` agrupa por oferta durante 200 ms y
+    procesa las solicitudes de mayor cantidad primero. La fila de SellerOffer se
+    bloquea antes de leer la cola, por lo que dos réplicas no reservan lo mismo.
+    Devuelve el número de bids que salieron del estado ``pending``.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now debe incluir zona horaria")
+
+    groups_result = await session.execute(
+        select(SellerBid.cycle_id, SellerBid.offer_id)
+        .where(
+            SellerBid.status == "pending",
+            SellerBid.created_at <= now - _BID_ARBITRATION_GRACE,
+        )
+        .group_by(SellerBid.cycle_id, SellerBid.offer_id)
+        .order_by(SellerBid.cycle_id, SellerBid.offer_id)
+        .limit(max_offers)
+    )
+    groups = groups_result.all()
+    processed = 0
+
+    for cycle_id, offer_id in groups:
+        offer_result = await session.execute(
+            select(SellerOffer)
+            .where(SellerOffer.cycle_id == cycle_id)
+            .with_for_update()
+        )
+        offer = offer_result.scalar_one_or_none()
+
+        bids_result = await session.execute(
+            select(SellerBid)
+            .where(
+                SellerBid.cycle_id == cycle_id,
+                SellerBid.offer_id == offer_id,
+                SellerBid.status == "pending",
+            )
+            .with_for_update()
+        )
+        bids = list(bids_result.scalars().all())
+        if not bids:
+            continue
+
+        strategy = await get_active_strategy(cycle_id, session=session)
+        if strategy.bid_acceptance_policy == "largest_quantity_first":
+            bids.sort(key=lambda item: (-item.quantity, item.created_at or now, item.id))
+        else:
+            bids.sort(key=lambda item: (item.created_at or now, item.id))
+
+        if not settings.market_enabled:
+            for bid in bids:
+                await _record_rejection(
+                    session,
+                    bid,
+                    reason="MARKET_CLOSED",
+                    available=None,
+                    now=now,
+                    settings=settings,
+                )
+                processed += 1
+            continue
+
+        if offer is None:
+            for bid in bids:
+                await _record_rejection(
+                    session,
+                    bid,
+                    reason="OFFER_WITHDRAWN",
+                    available=None,
+                    now=now,
+                    settings=settings,
+                )
+                processed += 1
+            continue
+
+        if offer.market_closed_at is not None or offer.status == CLOSED:
+            reason = "MARKET_CLOSED"
+        elif offer.offer_id != offer_id or offer.status != ACTIVE:
+            reason = "OFFER_WITHDRAWN"
+        else:
+            reason = None
+
+        if reason is not None:
+            for bid in bids:
+                await _record_rejection(
+                    session,
+                    bid,
+                    reason=reason,
+                    available=None,
+                    now=now,
+                    settings=settings,
+                )
+                processed += 1
+            continue
+
+        min_bid, last_bid_at = await _market_rules(session, cycle_id)
+        for bid in bids:
+            if bid.buyer_city == settings.city_code.upper():
+                await _record_rejection(
+                    session, bid, reason="SELF_TRADE", available=None, now=now, settings=settings
+                )
+            elif now >= last_bid_at:
+                await _record_rejection(
+                    session,
+                    bid,
+                    reason="MARKET_CLOSED",
+                    available=None,
+                    now=now,
+                    settings=settings,
+                )
+            elif Decimal(bid.quantity) < min_bid:
+                await _record_rejection(
+                    session,
+                    bid,
+                    reason="BID_TOO_SMALL",
+                    available=None,
+                    now=now,
+                    settings=settings,
+                )
+            else:
+                available = int(offer.remaining or 0)
+                if bid.quantity > available:
+                    await _record_rejection(
+                        session,
+                        bid,
+                        reason="QUANTITY_UNAVAILABLE",
+                        available=available,
+                        now=now,
+                        settings=settings,
+                    )
+                else:
+                    if offer.price_per_energy is None:
+                        raise ValueError("la oferta activa no tiene price_per_energy")
+                    bid.status = RESERVED
+                    bid.price_per_energy = offer.price_per_energy
+                    bid.reserved_at = now
+                    offer.remaining = available - bid.quantity
+                    offer.updated_at = now
+            processed += 1
+
+    await session.flush()
+    return processed
+
+
+async def process_pending_bids(settings: Settings) -> None:
+    """Procesa la cola de bids; lo ejecuta el polling persistente de la outbox."""
+    async with _session_factory() as session:
+        await arbitrate_pending_bids(session, datetime.now(UTC), settings)
+        await session.commit()
 
 
 register_handler("bid", apply_bid_message)

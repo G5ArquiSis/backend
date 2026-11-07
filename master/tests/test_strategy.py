@@ -2,8 +2,14 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import text
 
-from app.market.strategy import DEFAULT_STRATEGY, StrategyConfig, get_active_strategy
+from app.market.strategy import (
+    DEFAULT_STRATEGY,
+    StrategyConfig,
+    get_active_strategy,
+    update_active_strategy,
+)
 
 
 def test_default_strategy_has_valid_values() -> None:
@@ -83,9 +89,44 @@ def test_strategy_is_immutable_and_rejects_unknown_fields() -> None:
         StrategyConfig(unexpected_parameter=True)
 
 
-async def test_get_active_strategy_returns_default_stub() -> None:
-    strategy = await get_active_strategy("cycle-001")
+async def test_get_active_strategy_creates_default_snapshot(session) -> None:
+    await session.execute(
+        text(
+            "TRUNCATE cycle_strategy_snapshots, strategy_state, strategy_versions "
+            "RESTART IDENTITY CASCADE"
+        )
+    )
+    strategy = await get_active_strategy("cycle-001", session=session)
     assert strategy == DEFAULT_STRATEGY
+
+
+async def test_cycle_snapshot_is_immutable_and_new_cycle_uses_latest_version(session) -> None:
+    await session.execute(
+        text(
+            "TRUNCATE cycle_strategy_snapshots, strategy_state, strategy_versions "
+            "RESTART IDENTITY CASCADE"
+        )
+    )
+    await session.commit()
+
+    first_version = StrategyConfig(price_factor=Decimal("0.25"), buy_wait_span_seconds=30)
+    await update_active_strategy(session, first_version)
+    await session.commit()
+
+    first_cycle = await get_active_strategy("cycle-before-change", session=session)
+    assert first_cycle == first_version
+    await session.commit()
+
+    second_version = StrategyConfig(price_factor=Decimal("0.8"), buy_wait_span_seconds=90)
+    await update_active_strategy(session, second_version)
+    await session.commit()
+
+    # El ciclo ya abierto conserva el snapshot anterior; un ciclo nuevo toma la versión actual.
+    same_cycle = await get_active_strategy("cycle-before-change", session=session)
+    next_cycle = await get_active_strategy("cycle-after-change", session=session)
+    assert same_cycle == first_version
+    assert next_cycle == second_version
+    await session.commit()
 
 
 async def test_get_active_strategy_rejects_empty_cycle_id() -> None:

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from app.database import create_schema, engine
 from app.migrations import run_migrations
-from app.routers import experiments, health, history, internal, market, negotiations
+from app.routers import experiments, health, history, internal, market, negotiations, strategy
 
 
 @asynccontextmanager
@@ -27,5 +27,6 @@ app.include_router(health.router)
 app.include_router(history.router)
 app.include_router(internal.router)
 app.include_router(negotiations.router)
+app.include_router(strategy.router)
 app.include_router(market.router)
 app.include_router(experiments.router)

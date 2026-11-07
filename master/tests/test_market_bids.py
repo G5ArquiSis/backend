@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.cycle_repository import APPLIED, DUPLICATE, apply_central_message
 from app.database import _session_factory
+from app.market.bids import arbitrate_pending_bids
 from app.market.models import SellerBid, SellerOffer
 from app.market.seller import ACTIVE, withdraw_offer
+from app.market.strategy import StrategyConfig, update_active_strategy
 from app.market.swaps import (
     reconcile_pending_swap_events,
     reconcile_pending_swap_proposals,
@@ -94,7 +96,8 @@ async def db(database: None):
     async with _session_factory() as session:
         await session.execute(
             text(
-                "TRUNCATE seller_bids, seller_offers, cycle_market_messages, ledger_events, "
+                "TRUNCATE cycle_strategy_snapshots, strategy_state, strategy_versions, "
+                "seller_bids, seller_offers, cycle_market_messages, ledger_events, "
                 "cycle_ledger, wallet_events, outbox RESTART IDENTITY CASCADE"
             )
         )
@@ -132,6 +135,59 @@ async def test_valid_bid_reserves_remaining_for_c4(db: AsyncSession) -> None:
         row.payload.get("type") == "bid-accepted"
         for row in (await db.execute(select(OutboxMessage))).scalars().all()
     )
+
+
+async def test_largest_quantity_first_arbitrates_pending_bids(db: AsyncSession) -> None:
+    await update_active_strategy(
+        db,
+        StrategyConfig(bid_acceptance_policy="largest_quantity_first"),
+    )
+    await db.commit()
+    offer = await open_offer(db)
+
+    # El bid pequeño llega primero, pero la estrategia prioriza la cantidad mayor.
+    assert await apply_central_message(
+        db,
+        bid_message(idpk="bid-small", msg_id="msg-small", quantity=300),
+        NOW + timedelta(seconds=1),
+        SETTINGS,
+    ) == APPLIED
+    assert await apply_central_message(
+        db,
+        bid_message(idpk="bid-large", msg_id="msg-large", city_id="MEL", quantity=350),
+        NOW + timedelta(seconds=1, milliseconds=40),
+        SETTINGS,
+    ) == APPLIED
+
+    bids_before = (await db.execute(select(SellerBid))).scalars().all()
+    assert len(bids_before) == 2
+    assert all(bid.status == "pending" for bid in bids_before)
+
+    # Antes de 200 ms todavía no arbitra: permite agrupar el bid que llega 40 ms después.
+    processed = await arbitrate_pending_bids(
+        db,
+        NOW + timedelta(seconds=1, milliseconds=100),
+        SETTINGS,
+    )
+    assert processed == 0
+
+    processed = await arbitrate_pending_bids(
+        db,
+        NOW + timedelta(seconds=2),
+        SETTINGS,
+    )
+    assert processed == 2
+
+    await db.refresh(offer)
+    assert offer.remaining == 250
+    bids = {
+        bid.idpk: bid
+        for bid in (await db.execute(select(SellerBid))).scalars().all()
+    }
+    assert bids["bid-large"].status == "reserved"
+    assert bids["bid-small"].status == "rejected"
+    assert bids["bid-small"].reason == "QUANTITY_UNAVAILABLE"
+    assert bids["bid-small"].available == 250
 
 
 async def test_same_idpk_is_deduplicated_without_reserving_twice(db: AsyncSession) -> None:

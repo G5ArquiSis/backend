@@ -62,10 +62,14 @@ async def claim_pending_messages(
     persistidos y encola lo que venció: el negotiation-report del ciclo y los
     reintentos de propuestas. Esa revisión es el reloj del sistema (ADR de AD3).
     """
+    from app.market.bids import process_pending_bids
     from app.market.buyer import buyer_tick
     from app.market.swaps import process_reserved_bids
     from app.wallet.scheduler import reconcile_due
 
+    # Primero se arbitran los bids agrupados; luego C4 propone los swaps que
+    # hayan quedado reservados en la misma consulta de outbox.
+    background_tasks.add_task(process_pending_bids, settings)
     background_tasks.add_task(process_reserved_bids, settings)
     background_tasks.add_task(reconcile_due, settings)
     background_tasks.add_task(buyer_tick, settings)
