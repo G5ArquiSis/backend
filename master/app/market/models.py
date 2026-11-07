@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Integer, Numeric, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -80,4 +80,46 @@ class SellerBid(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class StrategyVersion(Base):
+    """Versión inmutable de la estrategia configurable (C5 / AD6)."""
+
+    __tablename__ = "strategy_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    version: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    config: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class StrategyState(Base):
+    """Puntero singleton a la versión vigente de estrategia."""
+
+    __tablename__ = "strategy_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    active_version_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_versions.id"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class CycleStrategySnapshot(Base):
+    """Snapshot inmutable de la estrategia efectiva utilizada por cada ciclo."""
+
+    __tablename__ = "cycle_strategy_snapshots"
+
+    cycle_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    strategy_version_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_versions.id"), nullable=False, index=True
+    )
+    config: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )

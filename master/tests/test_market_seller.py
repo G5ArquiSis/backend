@@ -77,7 +77,8 @@ async def db(database: None):
     async with _session_factory() as session:
         await session.execute(
             text(
-                "TRUNCATE seller_offers, cycle_market_messages, ledger_events, "
+                "TRUNCATE cycle_strategy_snapshots, strategy_state, strategy_versions, "
+                "seller_offers, cycle_market_messages, ledger_events, "
                 "cycle_ledger, wallet_events, outbox RESTART IDENTITY CASCADE"
             )
         )

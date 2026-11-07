@@ -40,6 +40,11 @@ SUMMARIES = {
     ("/connectivity", "get"): "Distance-table vigente (RF02)",
     ("/message-log", "get"): "Mensajes duplicados, descartados o con NACK (RF05)",
     ("/wallet/balance-status", "get"): "Balance oficial de la wallet y su conciliación (AD5)",
+    ("/strategy", "get"): "Consultar la estrategia activa (RF04)",
+    ("/strategy", "put"): "Actualizar la estrategia para el siguiente ciclo (RF04)",
+    ("/strategy/offer", "get"): "Consultar la configuración de la oferta propia (RF04)",
+    ("/strategy/offer", "patch"): "Actualizar precio y cantidad de la oferta (RF04)",
+    ("/strategy/swaps", "get"): "Consultar los swaps propios en curso (RF04)",
 }
 PUBLIC_WITHOUT_TOKEN = {"/health"}
 
@@ -49,7 +54,9 @@ Gateway (`https://api.melchort.me`), que exige un JWT de Auth0 y agrega los head
 
 - RF01: `/cycles` y `/cycles/{cycle_id}`
 - RF02: `/connectivity`
-- RF04: `/negotiations`
+- RF04: `/strategy`, `/strategy/offer` y `/strategy/swaps`
+- E1: `/negotiations` (POST retirado en protocolo v3)
+- AD5: `/wallet/balance-status` (saldo oficial y conciliación de Wallet)
 - RF05: `/message-log`
 - E0: `/history`
 
