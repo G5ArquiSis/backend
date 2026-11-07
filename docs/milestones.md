@@ -53,7 +53,7 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 | Hito H3: primer swap liquidado en producción | G04 | — | Pendiente: C4 y D4 ya están en `main`; falta encender los flags |
 | Encender `MARKET_ENABLED`, `WALLET_ENABLED` y `BUYER_ENABLED` en la EC2 | G02, G03 | — | Pendiente |
 | Gates G01 a G09 con evidencia ([gates-e2.md](gates-e2.md)) | Gates | Antes de la demo | Parcial: G01, G05, G06, G07, G08 y G09 comprobados (2026-11-06) |
-| D7: correr el experimento de span y escribir el informe | RF06, RDOC05 | — | Pendiente: método y herramientas listos ([experimento-span.md](experimento-span.md)); necesita el comprador encendido y la pantalla de estrategia (C6, frontend PR #11) |
+| D7: correr el experimento de span y escribir el informe | RF06, RDOC05 | (PR #44) | Corrida controlada local hecha (9 ciclos, spans 10/30/90 s × latencias 20/60 s/nunca; `scripts/experimento_span.py`) e informe en [experimento-span.md](experimento-span.md): recomienda span 30 s y detecta que el comprador vuelve a pujar a una oferta que no responde. Pendiente: repetirla con ciclos reales cuando el comprador esté encendido en producción |
 
 ### M7 — Calidad, documentación y demo
 
