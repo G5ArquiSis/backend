@@ -25,6 +25,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import metrics
 from app.config import Settings
 from app.handler_registry import HANDLERS as _HANDLERS
 from app.handler_registry import register_handler
@@ -422,7 +423,32 @@ async def run_due_work(session: AsyncSession, now: datetime, settings: Settings)
     # await _retry_or_expire_negotiations(session, now, settings) //ahora la wallet lo maneja
     await _send_due_reports(session, now, settings)
     await _request_missing_statements(session, now, settings)
+    closed = await _mark_closed_cycles(session, now)
     await session.commit()
+    for attributes in closed:
+        metrics.record("CycleClosed", attributes)
+
+
+async def _mark_closed_cycles(session: AsyncSession, now: datetime) -> list[dict]:
+    """Ciclos cuya ventana venció y que aún no se informaron a New Relic (G03).
+
+    Se informa cada uno una vez, con o sin reporte: así un ciclo sin reporte se ve como
+    `CycleClosed` con `reportSent = false`, y la ausencia de eventos dice que el reloj
+    (connector llamando a /outbox/claim) se detuvo.
+    """
+    closed = await session.execute(
+        select(CycleLedger)
+        .where(
+            CycleLedger.valid_until <= now,
+            CycleLedger.closure_recorded_at.is_(None),
+        )
+        .with_for_update(skip_locked=True)
+    )
+    attributes = []
+    for cycle in closed.scalars().all():
+        attributes.append(metrics.cycle_closed_attributes(cycle))
+        cycle.closure_recorded_at = now
+    return attributes
 
 
 async def _send_due_reports(session: AsyncSession, now: datetime, settings: Settings) -> None:

@@ -1,13 +1,13 @@
-"""Mensajes que connector entiende: validación del envelope v2 y armado de respuestas.
+"""Mensajes que connector entiende: validación del envelope v3 y armado de respuestas.
 
-Tiene dos partes. La primera es el protocolo de la E1 con la central: qué mensaje
-se descarta, cuál se responde con NACK y cómo se arma un ACK. La segunda es el
-evento demand-set de la E0, que sigue llegando por la cola del observer.
-
-master define su propia versión de estos contratos a propósito: son quanta
-independientes y no comparten código (CLAUDE.md 2). Lo único que ambos acuerdan
-es el nombre y el tipo de cada campo del JSON.
+Tiene tres partes:
+1. El protocolo entre ciudades y con la central: qué mensaje se descarta, cuál se responde
+   con NACK, validación estricta de identidad (user_id vs cityId) y cómo se arma un ACK.
+2. Manejo de tipos retirados de la E1 (negotiation-proposal, give, take, demand-statement).
+3. El evento demand-set de la E0, que sigue llegando por la cola del observer.
 """
+
+from __future__ import annotations
 
 import json
 import uuid
@@ -18,28 +18,63 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 VALID_TYPES = {
+    # Protocolo base
     "ack",
     "nack",
     "error",
     "status-statement",
     "transfer",
-    "demand-statement",
     "distance-table",
+    "negotiation-report",
+    "request",
+    # Protocolo v3: mercado
+    "offer",
+    "offer-updated",
+    "offer-withdrawn",
+    "market-closed",
+    # Protocolo v3: mensajes entre ciudades
+    "bid",
+    "bid-accepted",
+    "bid-rejected",
+    # Protocolo v3: liquidaciones centrales y eventos de wallet
+    "trade-recorded",
+    "imbalance-settlement",
+    "swap-proposed",
+    "swap-settled",
+    "swap-rejected",
+    "swap-expired",
+    "swap-cancelled",
+    # Tipos retirados de la E1
+    "demand-statement",
     "give",
     "take",
     "negotiation-proposal",
-    "negotiation-report",
-    "request",
 }
 
-# No se hace ACK de un ACK, de un NACK ni de un error: evita el loop de cortesía.
-TYPES_WITHOUT_ACK = {"ack", "nack", "error"}
+# Tipos de la E1 que la central retiró en v3 (responde TYPE_RETIRED 410)
+RETIRED_TYPES = {
+    "demand-statement",
+    "give",
+    "take",
+    "negotiation-proposal",
+}
+
+# Mensajes a los que NUNCA se responde con ACK a nivel de aplicación (evita loops y cumple v3)
+TYPES_WITHOUT_ACK = {
+    "ack",
+    "nack",
+    "error",
+    "offer",
+    "offer-updated",
+    "offer-withdrawn",
+    "market-closed",
+    "bid-rejected",
+}
 
 
 def construir_mensaje_ack(msg_id_origen: str, city_code: str) -> dict[str, Any]:
     """ACK de un mensaje recibido; solo confirma la recepción, no su contenido."""
     return {
-        # idpk y msgId nuevos y distintos entre sí: es un mensaje independiente.
         "idpk": str(uuid.uuid4()),
         "msgId": str(uuid.uuid4()),
         "type": "ack",
@@ -57,10 +92,9 @@ def construir_mensaje_nack(
     cycle_id: str | None = None,
     city_code: str | None = None,
 ) -> dict[str, Any]:
-    """NACK de un mensaje malformado. `reason` y `code` van en el nivel superior."""
+    """NACK de un mensaje malformado o no aceptado. `reason` y `code` van en nivel superior."""
     data: dict[str, Any] = {"target": target, "message": mensaje}
     if cycle_id is not None:
-        # Se devuelve tal cual, para que el emisor aparee el rechazo con su mensaje.
         data["cycleId"] = cycle_id
 
     nack: dict[str, Any] = {
@@ -90,15 +124,18 @@ def construir_solicitud_directa(tipo_pedido: str, city_code: str) -> dict[str, A
 
 
 def validacion_mensaje_entrante(
-    body: bytes, city_code: str | None = None
+    body: bytes,
+    city_code: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
-    """Clasifica un mensaje de la central. Devuelve (mensaje, nack, razón de descarte).
+    """Clasifica un mensaje entrante de la cola de la ciudad. Devuelve (mensaje, nack, razón).
 
-    Exactamente uno de los tres viene con valor:
-      - (None, None, razón): no se puede parsear o no trae msgId. Se descarta y se
-        registra; no hay mensaje válido al cual responder.
-      - (None, nack, None): el envelope es parseable pero inválido. Se responde NACK.
-      - (mensaje, None, None): válido.
+    Verifica:
+    - JSON parseable y presencia de msgId.
+    - Tipos retirados de la E1 (se descartan sin NACK ni reintento).
+    - Reglas de identidad de la E2: si el mensaje trae cityId (ej: bid), user_id de AMQP
+      debe ser 'city.{cityId}'. De lo contrario se responde NACK IDENTITY_MISMATCH (403).
+    - Envelope válido (idpk != msgId, campos obligatorios).
     """
     try:
         data = json.loads(body.decode("utf-8"))
@@ -112,29 +149,72 @@ def validacion_mensaje_entrante(
     if not msg_id or not isinstance(msg_id, str):
         return (None, None, "El mensaje no incluye msgId")
 
-    def nack(
-        reason: str, code: int, mensaje: str
-    ) -> tuple[None, dict[str, Any] | None, str | None]:
-        msg_type = data.get("type")
-        if msg_type in TYPES_WITHOUT_ACK:
-            # No se hace NACK de un ACK, de un NACK ni de un error: se descarta y se registra.
-            return (None, None, f"{reason}: {mensaje} (no se responde a un {msg_type})")
-        cycle_id = data.get("cycleId")
+    msg_type = data.get("type")
+
+    # 1. Tratamiento de tipos retirados de la E1
+    if msg_type in RETIRED_TYPES:
         return (
             None,
-            construir_mensaje_nack(
-                msg_id,
-                reason,
-                code,
-                mensaje,
-                cycle_id if isinstance(cycle_id, str) else None,
-                city_code,
-            ),
             None,
+            f"TYPE_RETIRED: el tipo '{msg_type}' fue retirado en el protocolo v3 (410)",
         )
 
+    # 2. Si es una notificación de error TYPE_RETIRED de la central, es válida para registro
+    if msg_type == "error" and (data.get("reason") == "TYPE_RETIRED" or data.get("code") == 410):
+        return (data, None, None)
+
+    # Helper para construir NACK
+    def nack(
+        reason: str,
+        code: int,
+        mensaje: str,
+        target_routing_key: str | None = None,
+    ) -> tuple[None, dict[str, Any] | None, str | None]:
+        if msg_type in TYPES_WITHOUT_ACK:
+            return (None, None, f"{reason}: {mensaje} (no se responde a un {msg_type})")
+        cycle_id = data.get("cycleId")
+        nack_obj = construir_mensaje_nack(
+            msg_id,
+            reason,
+            code,
+            mensaje,
+            cycle_id if isinstance(cycle_id, str) else None,
+            city_code,
+        )
+        if target_routing_key:
+            nack_obj["_target_routing_key"] = target_routing_key
+        return (None, nack_obj, None)
+
+    # 3. Validación de Identidad (user_id de AMQP) para mensajes punto a punto entre ciudades
+    sender_city = data.get("cityId")
+    if sender_city and msg_type in ("bid", "bid-accepted", "bid-rejected"):
+        expected_user_id = f"city.{sender_city}"
+        if not user_id:
+            # Falta user_id en el mensaje: se descarta y registra (no se sabe a quién enviar NACK)
+            return (
+                None,
+                None,
+                f"IDENTITY_MISMATCH: falta user_id AMQP en {msg_type} de ciudad {sender_city}",
+            )
+        if user_id != expected_user_id:
+            # user_id no corresponde a su cityId: responde NACK IDENTITY_MISMATCH a la cola
+            # de quien publicó
+            if user_id.startswith("city."):
+                return nack(
+                    "IDENTITY_MISMATCH",
+                    403,
+                    f"user_id '{user_id}' no corresponde al cityId '{sender_city}'",
+                    target_routing_key=user_id,
+                )
+            return (
+                None,
+                None,
+                f"IDENTITY_MISMATCH: user_id '{user_id}' ajeno y no corresponde a cityId "
+                f"'{sender_city}'",
+            )
+
+    # 4. Validación del envelope estándar
     idpk = data.get("idpk")
-    msg_type = data.get("type")
     if not idpk or not msg_type or not data.get("timestamp") or "data" not in data:
         return nack(
             "MALFORMED_MESSAGE",
@@ -192,11 +272,7 @@ class DemandEventMessage(BaseModel):
 
 
 def parse_demand_event(body: bytes) -> DemandEventMessage:
-    """Convierte el JSON crudo del broker en un evento validado.
-
-    Levanta MalformedEventError indicando qué campo falló: tragarse el error acá
-    rompería RNF1 sin que se note en desarrollo.
-    """
+    """Convierte el JSON crudo del broker en un evento validado."""
     try:
         return DemandEventMessage.model_validate_json(body)
     except ValueError as exc:

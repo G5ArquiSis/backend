@@ -1,12 +1,19 @@
 # Stack de producción en la EC2 (RNF04 E1). A diferencia del compose local:
 # - usa imágenes de ECR (nunca `build:`); los tags los escribe el deploy en release.env;
-# - limita memoria (t3.micro tiene 1 GB) y rota logs para no llenar el disco;
+# - limita memoria (t3.micro tiene 1 GB; presupuesto en docs/infraestructura.md § Memoria)
+#   y rota logs para no llenar el disco;
 # - publica las réplicas de master solo en loopback: el tráfico externo entra por Nginx
 #   en el host, que las balancea (deploy/nginx/energyshark-tls.conf).
 #
-# El workflow de deploy copia este archivo a /opt/energyshark en cada despliegue.
+# Las variables de la E2 (MARKET_ENABLED, WALLET_*) llegan por env_file desde
+# /opt/energyshark/.env, igual que las demás: no hay que listarlas acá.
+#
+# El workflow de deploy copia este archivo a /opt/energyshark en cada despliegue y
+# deploy/remote-deploy.sh lo levanta (con rollback automático si algo no queda healthy).
 # Uso manual en la EC2:
 #   docker compose --env-file .env --env-file release.env -f docker-compose.prod.yml up -d
+# No renombrar: el nombre del proyecto prefija el volumen de la base (energyshark-e1_pgdata).
+# Con otro nombre, compose crearía una base vacía y dejaría la actual huérfana.
 name: energyshark-e1
 
 x-logging: &logging
