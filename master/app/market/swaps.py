@@ -8,12 +8,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 
 from app.config import Settings
 from app.database import _session_factory
 from app.ledger import total_amount
 from app.market.models import SellerBid
+from app.market import seller as market_seller
 from app.models import WalletEvent
 from app.outbox import Destination, enqueue_publish
 from app.wallet.client import WalletClient, WalletError
@@ -31,6 +32,7 @@ _RETRY_SECONDS = 120
 _BATCH_SIZE = 10
 
 _RETRYABLE_WALLET_STATUSES = {429, 502, 503, 504}
+_TERMINAL_SWAP_EVENTS = {"swap-settled", "swap-rejected", "swap-expired", "swap-cancelled"}
 
 
 def _timestamp(value: datetime) -> str:
@@ -100,6 +102,7 @@ async def process_reserved_bids(settings: Settings) -> None:
     # Un evento puede haber llegado antes que la respuesta HTTP. Reprocesamos
     # los eventos ya asociados a bids antes de buscar nuevas propuestas.
     async with _session_factory() as session:
+        await reconcile_pending_swap_events(session, now, settings)
         await reconcile_pending_swap_proposals(session, now, settings)
         await session.commit()
 
@@ -308,9 +311,11 @@ async def process_reserved_bids(settings: Settings) -> None:
             # Esta segunda transacción evita mantener el bloqueo del bid
             # mientras se actualizan las asociaciones/eventos Wallet.
             async with _session_factory() as session:
+                reconcile_now = datetime.now(UTC)
+                await reconcile_pending_swap_events(session, reconcile_now, settings)
                 await reconcile_pending_swap_proposals(
                     session,
-                    datetime.now(UTC),
+                    reconcile_now,
                     settings,
                 )
                 await session.commit()
@@ -400,6 +405,11 @@ async def apply_swap_proposed(
 
     bid.swap_id = swap_id
 
+    # Un evento terminal puede haber llegado antes que la respuesta HTTP o que
+    # swap-proposed. Al conocer el swapId lo reconciliamos antes de aceptar.
+    await reconcile_pending_swap_events(session, now, settings)
+    await session.refresh(bid)
+
     # Un evento tardío no debe reactivar un bid que ya terminó.
     if bid.status not in {"reserved", "wallet_error", "proposed"}:
         return
@@ -441,3 +451,200 @@ async def apply_swap_proposed(
         payload=payload,
         destination=Destination.city(bid.buyer_city),
     )
+
+
+async def reconcile_pending_swap_events(
+    session,
+    now: datetime,
+    settings: Settings,
+) -> int:
+    """Aplica eventos terminales que llegaron antes de asociar el swap al bid.
+
+    Los eventos pueden traer el idpk de una operación propia o externa. Se intenta
+    correlacionar por idpk contra SellerBid; un idpk externo no tendrá coincidencia.
+    El swapId sigue siendo la correlación principal cuando ya se conoce.
+    """
+    pending_swap_ids = select(SellerBid.swap_id).where(
+        SellerBid.swap_id.is_not(None),
+        SellerBid.status.in_(("reserved", "wallet_error", "proposed")),
+    )
+    pending_bid_ids = select(SellerBid.idpk).where(
+        SellerBid.status.in_(("reserved", "wallet_error", "proposed")),
+    )
+    terminal_fact = or_(
+        WalletEvent.event_type.in_(("swap-settled", "swap-expired", "swap-cancelled")),
+        and_(
+            WalletEvent.event_type == "swap-rejected",
+            or_(
+                WalletEvent.payload["data"]["reason"].astext == "INSUFFICIENT_ASSET",
+                WalletEvent.payload["reason"].astext == "INSUFFICIENT_ASSET",
+            ),
+        ),
+    )
+    result = await session.execute(
+        select(WalletEvent)
+        .where(
+            terminal_fact,
+            or_(
+                WalletEvent.swap_id.in_(pending_swap_ids),
+                WalletEvent.operation_idpk.in_(pending_bid_ids),
+            ),
+        )
+        .order_by(WalletEvent.received_at, WalletEvent.id)
+        .limit(_BATCH_SIZE)
+    )
+    events = result.scalars().all()
+    processed = 0
+    for wallet_event in events:
+        if await apply_swap_terminal_event(
+            session, wallet_event.payload, now, settings
+        ):
+            processed += 1
+    return processed
+
+
+async def apply_swap_terminal_event(
+    session,
+    message: dict,
+    now: datetime,
+    settings: Settings,
+) -> bool:
+    """Aplica la liquidación, rechazo, expiración o cancelación de un swap propio."""
+    event_type = message.get("type")
+    if event_type not in _TERMINAL_SWAP_EVENTS:
+        raise ValueError("tipo de evento swap terminal inválido")
+
+    data = message.get("data")
+    if not isinstance(data, dict):
+        raise ValueError(f"{event_type} requiere data")
+
+    swap_id = data.get("swapId")
+    if not isinstance(swap_id, str) or not swap_id.strip():
+        raise ValueError(f"{event_type} requiere data.swapId")
+
+    operation_idpk = data.get("idpk")
+    if operation_idpk is not None and not isinstance(operation_idpk, str):
+        raise ValueError("data.idpk debe ser texto")
+
+    reason = data.get("reason") or message.get("reason")
+    operation = data.get("operation") or message.get("operation")
+
+    # swap-rejected solo es terminal cuando la wallet informa saldo insuficiente.
+    # Otros rechazos de accept pueden ser intentos inválidos sin cancelar la propuesta.
+    if event_type == "swap-rejected" and reason != "INSUFFICIENT_ASSET":
+        return False
+
+    by_swap_result = await session.execute(
+        select(SellerBid).where(SellerBid.swap_id == swap_id)
+    )
+    by_swap = by_swap_result.scalar_one_or_none()
+
+    # El idpk de una operación externa (por ejemplo, un cierre de la central)
+    # no coincidirá con SellerBid.idpk. Aun así, intentar la búsqueda permite
+    # reconciliar una cancelación iniciada por nosotros antes de conocer swapId.
+    may_match_by_operation = operation != "accept" and bool(operation_idpk)
+    by_operation = None
+    if may_match_by_operation:
+        by_operation_result = await session.execute(
+            select(SellerBid).where(SellerBid.idpk == operation_idpk)
+        )
+        by_operation = by_operation_result.scalar_one_or_none()
+
+    if by_swap is not None and by_operation is not None and by_swap.id != by_operation.id:
+        raise ValueError("el evento wallet apunta a dos bids distintos")
+
+    candidate = by_swap or by_operation
+    if candidate is None:
+        # Puede ser un swap ajeno o un evento que llegó antes de conocer el bid.
+        return False
+
+    if candidate.swap_id is not None and candidate.swap_id != swap_id:
+        raise ValueError(f"el bid {candidate.idpk} ya tiene otro swap asociado")
+
+    # Registrar la relación antes de bloquear el bid conserva el orden de locks
+    # utilizado por apply_swap_proposed y el worker HTTP.
+    await register_swap_cycle(session, swap_id, candidate.cycle_id)
+
+    bid_result = await session.execute(
+        select(SellerBid)
+        .where(SellerBid.id == candidate.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    bid = bid_result.scalar_one_or_none()
+    if bid is None:
+        return False
+    if bid.swap_id is not None and bid.swap_id != swap_id:
+        raise ValueError(f"el bid {bid.idpk} ya tiene otro swap asociado")
+    bid.swap_id = swap_id
+
+    # El primer evento terminal válido gana. Las escrituras de la wallet son
+    # atómicas: un mismo swap no puede expirar/cancelarse y luego liquidarse.
+    if bid.status not in {"reserved", "wallet_error", "proposed"}:
+        return False
+
+    if event_type == "swap-settled":
+        bid.status = "settled"
+        bid.reason = None
+        await market_seller.publish_current_offer_remaining(
+            session, bid.cycle_id, now, settings
+        )
+        return True
+
+    if event_type == "swap-rejected":
+        bid.status = "rejected"
+        bid.reason = "INSUFFICIENT_ASSET"
+    elif event_type == "swap-expired":
+        bid.status = "expired"
+        bid.reason = "SWAP_EXPIRED"
+    else:  # swap-cancelled
+        bid.status = "cancelled"
+        bid.reason = "SWAP_CANCELLED"
+
+    offer_result = await session.execute(
+        select(market_seller.SellerOffer)
+        .where(market_seller.SellerOffer.cycle_id == bid.cycle_id)
+        .with_for_update()
+    )
+    offer = offer_result.scalar_one_or_none()
+    if offer is not None:
+        restored_remaining = int(offer.remaining or 0) + bid.quantity
+        await market_seller.restore_offer_remaining(
+            session, bid.cycle_id, restored_remaining, now, settings
+        )
+
+    # Solo el rechazo de nuestra propuesta ocurre antes de bid-accepted y debe
+    # traducirse a bid-rejected. En un accept fallido el comprador ya recibió
+    # bid-accepted y también recibe el swap-rejected de la wallet.
+    proposal_rejected = (
+        event_type == "swap-rejected"
+        and (operation == "propose" or (operation is None and operation_idpk == bid.idpk))
+    )
+    if proposal_rejected:
+        rejection_payload = {
+            "idpk": str(uuid.uuid4()),
+            "msgId": str(uuid.uuid4()),
+            "type": "bid-rejected",
+            "timestamp": _timestamp(now),
+            "cityId": settings.city_code.upper(),
+            "cycleId": bid.cycle_id,
+            "reason": "INSUFFICIENT_ASSET",
+            "code": (
+                data["code"]
+                if isinstance(data.get("code"), int) and not isinstance(data.get("code"), bool)
+                else 409
+            ),
+            "data": {
+                "target": bid.msg_id,
+                "offerId": bid.offer_id,
+                "requested": bid.quantity,
+            },
+        }
+        await enqueue_publish(
+            session,
+            dedupe_key=f"seller-bid:{bid.idpk}:rejected",
+            payload=rejection_payload,
+            destination=Destination.city(bid.buyer_city),
+        )
+
+    return True
