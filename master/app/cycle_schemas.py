@@ -17,10 +17,12 @@ class ApplyResult(CamelCaseModel):
 
 
 class OutboxItem(CamelCaseModel):
-    """Un mensaje que connector debe publicar a la central, tal cual viene en `payload`."""
+    """Un mensaje que connector debe publicar al destino indicado, tal cual viene en `payload`."""
 
     id: int
     payload: dict
+    exchange: str = "energy.x"
+    routing_key: str = "central"
 
 
 class NegotiationIn(CamelCaseModel):

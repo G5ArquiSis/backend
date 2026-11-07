@@ -10,6 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import metrics
 from app.config import Settings, get_settings
 from app.cycle_repository import (
     MalformedMessageError,
@@ -40,11 +41,14 @@ async def receive_message(
     nada. Los tipos que no afectan al ciclo responden `ignored`. Los tres son
     éxito para connector. Responde 422 si al mensaje le falta un campo de su tipo.
     """
+    now = datetime.now(UTC)
     try:
-        outcome = await apply_central_message(session, message, datetime.now(UTC), settings)
+        outcome = await apply_central_message(session, message, now, settings)
     except MalformedMessageError as error:
+        metrics.record_inbound_message(message, "malformed", now)
         raise HTTPException(status_code=422, detail=str(error)) from error
 
+    metrics.record_inbound_message(message, outcome, now)
     return ApplyResult(outcome=outcome)
 
 
@@ -65,7 +69,15 @@ async def claim_pending_messages(
     await run_due_work(session, now, settings)
     messages = await claim_outbox(session, now, settings)
 
-    return [OutboxItem(id=message.id, payload=message.payload) for message in messages]
+    return [
+        OutboxItem(
+            id=message.id,
+            payload=message.payload,
+            exchange=getattr(message, "exchange", "energy.x") or "energy.x",
+            routing_key=getattr(message, "routing_key", "central") or "central",
+        )
+        for message in messages
+    ]
 
 
 @router.post("/outbox/{message_id}/sent", status_code=status.HTTP_204_NO_CONTENT)

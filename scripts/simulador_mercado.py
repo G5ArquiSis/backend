@@ -142,11 +142,7 @@ def make_envelope(
 
 
 def make_offer(
-    cycle_id: str,
-    city_id: str,
-    offer_id: str,
-    quantity: float,
-    price: float,
+    cycle_id: str, city_id: str, offer_id: str, quantity: float, price: float
 ) -> dict[str, Any]:
     """Crea un mensaje offer del mercado público."""
     return {
@@ -267,9 +263,7 @@ def run_bids_scenario(base_url: str, cycle_id: str, our_city: str) -> None:
     bid1 = make_bid(cycle_id, "COR", f"{our_city}-{cycle_id}", 3500)
     status, resp = post_to_master(base_url, bid1)
     logger.info(
-        "Bid válido enviado desde COR (3500 kWh) -> HTTP %s outcome=%s",
-        status,
-        resp.get("outcome"),
+        "Bid válido enviado desde COR (3500 kWh) -> HTTP %s outcome=%s", status, resp.get("outcome")
     )
 
     # 2. Reintento con mismo idpk (debe devolver duplicate sin romper nada)
@@ -282,10 +276,7 @@ def run_bids_scenario(base_url: str, cycle_id: str, our_city: str) -> None:
 
 
 def run_anomalies_scenario(
-    base_url: str,
-    cycle_id: str,
-    our_city: str,
-    broker_url: str | None = None,
+    base_url: str, cycle_id: str, our_city: str, broker_url: str | None = None
 ) -> None:
     """Inyecta mensajes de prueba para las anomalías evaluadas en la demo."""
     logger.info("=== Inyectando anomalías de prueba (Anomalía 1 y 2) ===")
@@ -305,8 +296,7 @@ def run_anomalies_scenario(
         logger.info("Verifica en /message-log si connector respondió NACK IDENTITY_MISMATCH (403).")
     else:
         logger.info(
-            "Nota: Para verificar el NACK de IDENTITY_MISMATCH por AMQP "
-            "ejecuta con --broker-url."
+            "Nota: Para verificar el NACK de IDENTITY_MISMATCH por AMQP ejecuta con --broker-url."
         )
 
     # Mensaje malformado (sin datos obligatorios)

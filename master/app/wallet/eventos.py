@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.cycle_repository import APPLIED, DUPLICATE, _ensure_cycle
 from app.handler_registry import register_handler
+from app.market import seller as market_seller  # registra el modelo de ofertas antes de create_all
 from app.models import CycleLedger, WalletEvent, WalletSwapCycle
 
 """
@@ -82,6 +83,11 @@ async def apply_wallet_event(session, message, now, settings):
     )
     if inserted.scalar_one_or_none() is None:
         return DUPLICATE
+
+    if message["type"] == "market-closed":
+        if not cycle_id:
+            raise ValueError("market-closed requiere cycleId")
+        await market_seller.close_market(session, cycle_id, now)
 
     if cycle_id:
         cycle = await session.get(CycleLedger, cycle_id)

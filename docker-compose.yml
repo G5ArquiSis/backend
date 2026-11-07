@@ -54,6 +54,41 @@ services:
       - energyshark
     restart: unless-stopped
 
+  # --- Perfil "fake": broker y wallet locales (docker compose --profile fake up) ---
+  # Sin este perfil no se levantan. Para que master y connector los usen, agregar
+  # scripts/fake_wallet/env.fake al final de .env (ver scripts/fake_wallet/README.md).
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    profiles: ["fake"]
+    volumes:
+      - ./scripts/fake_wallet/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/90-energyshark.conf:ro
+      - ./scripts/fake_wallet/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"  # consola de administración (admin/admin)
+    networks:
+      - energyshark
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  fake-wallet:
+    build: ./scripts/fake_wallet
+    profiles: ["fake"]
+    environment:
+      # Publica los eventos como la central: user_id "central" en energy.x.
+      FAKE_WALLET_AMQP_URL: amqp://central:local-central@rabbitmq:5672/energy
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8090:8080"
+    networks:
+      - energyshark
+    restart: unless-stopped
+
 networks:
   energyshark:
     driver: bridge

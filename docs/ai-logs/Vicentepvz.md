@@ -104,5 +104,24 @@
 - **Correcciones del integrante:** Ninguna requerida; esquemas y simulador alineados con las referencias oficiales de la API v3.
 - **Referencia:** Rama `feat/a5-a6-schemas-simulador`.
 
+## 2026-11-06 — Mensajería, protocolo de mercado y outbox generalizada (Tareas A1, A2, A3 y A4)
+- **Herramienta y modo:** Antigravity, Gemini 3.8 Flash, agéntico.
+- **Tarea:** Implementar el consumidor del feed de mercado público `market.TAL` sin ACK de aplicación (Tarea A1), validación estricta de identidad AMQP con NACK `IDENTITY_MISMATCH` (403) y manejo de tipos retirados (Tarea A2), publicación generalizada con limitador de tasa deslizante de 60s (Tarea A3), y migración del esquema de outbox con `exchange` y `routing_key` en PostgreSQL y DTOs (Tarea A4).
+- **Prompts relevantes:**
+  > "Pasemos ahora al paso 3: implementemos el consumidor de la cola de mercado market.TAL sin ACK de aplicación, la validación de user_id con NACK IDENTITY_MISMATCH, la migración de la outbox con exchange y routing_key, y la publicación con rate limiter para dejar lista la mensajería del connector."
+- **Qué produjo la IA:**
+  - `backend/connector/config.py`: Ajuste de configuración AMQP para producción vhost `energy`, `market_queue_name = "market.TAL"` (sin `.q`), `market_offer_routing_key = "market.offer.TAL"`, límites `market_ops_per_minute = 60` y `request_ops_per_minute = 10`, y compatibilidad de entorno cuando `pydantic_settings` no está instalado en entornos locales de prueba.
+  - `backend/connector/events.py`: Definición de `VALID_TYPES`, `RETIRED_TYPES` y `TYPES_WITHOUT_ACK`. Actualización de `validacion_mensaje_entrante` para verificar correspondencia de `user_id == f"city.{sender_city}"`. Si hay discrepancia, emite NACK `IDENTITY_MISMATCH` (código 403) dirigido a la cola real de quien publicó (`user_id`), o descarta si no hay identidad confiable. Descarte automático y registro sin NACK de tipos retirados de E1 (`TYPE_RETIRED`).
+  - `backend/connector/consumer.py`:
+    - Clase `SlidingWindowRateLimiter` para ventana deslizante de 60 segundos por categoría de operación (ofertas de mercado max 60/min, peticiones max 10/min), reteniendo mensajes en la outbox sin descartar cuando se sobrepasa el límite.
+    - Publicación en `publish_message` generalizada hacia cualquier `exchange` y `routing_key` de la outbox, inyectando siempre la identidad propia `user_id="city.TAL"`.
+    - Hilo y loop de consumo `serve_market_queue` y `handle_market_delivery` para la cola `market.TAL`: persiste eventos en master y confirma con `basic_ack` a RabbitMQ, garantizando que nunca se envíen ACKs de aplicación al mercado.
+  - `backend/master/app/migrations/sql/0001_outbox_exchange_routing_key.sql`: Migración SQL idempotente que agrega `exchange` (`VARCHAR(64) DEFAULT 'energy.x'`) y `routing_key` (`VARCHAR(128) DEFAULT 'central'`) a la tabla `outbox` con índice en `exchange`.
+  - `backend/master/app/models.py`, `backend/master/app/cycle_schemas.py`, `backend/master/app/routers/internal.py`, `backend/master/app/outbox.py`: Integración de las columnas `exchange` y `routing_key` en el modelo SQLAlchemy `OutboxMessage`, el schema Pydantic `OutboxItem`, el endpoint de reclamo `/internal/outbox/claim` y properties helper en `Destination`.
+  - `backend/connector/tests/test_v3_protocol.py`: Suite exhaustiva de pruebas unitarias que valida `SlidingWindowRateLimiter`, rechazo de `IDENTITY_MISMATCH` con NACK al atacante, descarte de tipos retirados, persistencia de mercado sin ACK de aplicación, y enrutamiento con rate limiting desde outbox.
+- **Verificación:** Ejecución y paso del 100% de las pruebas en `test_v3_protocol.py` (8 passed), `test_events.py` (8 passed) y `test_outbox.py` (5 passed).
+- **Correcciones del integrante:** Se corrigieron los dobles de prueba en los tests de `connector` para compatibilidad con `MasterClient` y `Settings`.
+- **Referencia:** Rama `feat/a1-a4-mensajeria-protocolo`.
+
 
 
