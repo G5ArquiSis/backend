@@ -182,7 +182,9 @@ class MessageLog(Base):
     message_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    sender_city: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Su índice es ix_message_log_sender_city en __table_args__ (mismo nombre que la migración
+    # 0006); `index=True` acá lo crearía dos veces y master no arranca en una base nueva.
+    sender_city: Mapped[str | None] = mapped_column(String(64), nullable=True)
     sender_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Texto y no JSONB: un mensaje descartado puede no ser JSON válido.
     raw_content: Mapped[str] = mapped_column(Text)

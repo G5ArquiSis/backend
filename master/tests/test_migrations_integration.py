@@ -94,3 +94,14 @@ async def test_a_failing_migration_rolls_back_the_whole_batch(clean: None, tmp_p
             text("SELECT count(*) FROM schema_migrations WHERE version LIKE '9%'")
         )
         assert registered.scalar() == 0
+
+
+def test_metadata_has_no_duplicate_index_names() -> None:
+    # Un `index=True` en la columna más un Index explícito con el mismo nombre hace que
+    # `create_all` emita dos CREATE INDEX: en una base nueva master no arranca. Las bases que ya
+    # tenían la tabla no lo notan, porque create_all no toca tablas existentes.
+    import app.main  # noqa: F401  registra todos los modelos
+    from app.models import Base
+
+    names = [index.name for table in Base.metadata.tables.values() for index in table.indexes]
+    assert sorted({n for n in names if names.count(n) > 1}) == []
