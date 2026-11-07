@@ -31,7 +31,7 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 | A4: migración de la tabla outbox | RF03 | — | En revisión (PR #28) |
 | A5: schemas JSON de los mensajes E2 | RDOC04 | 2026-11-07 | Cumplido: schemas en `contratos` (PR #5) y validación en el backend (PR #25) |
 | A6: simulador de mercado | Pruebas | — | En revisión (PR #25) |
-| A7: RF05 con los mensajes de la E2 | RF05 | — | Parcial: el registro de la E1 (`/message-log`) está en `main`; falta lo de otras ciudades |
+| A7: RF05 con los mensajes de la E2 | RF05 | 2026-11-07 | Cumplido: endpoint /message-log filtrable con remitente/fechas y contadores; vista Messages.jsx con visor crudo |
 | B1: `WalletClient` real, idempotente y tolerante a 202, 429, 502 y 504 | RF03 | 2026-11-06 | Cumplido (PR #21, #27) |
 | B2: eventos de wallet aplicados una sola vez y en cualquier orden | RF03, RF05 | 2026-11-06 | Cumplido (PR #21, #27) |
 | B3: reconciliación con `GET /balance` (AD5) | AD5 | 2026-11-06 | Cumplido (PR #22). La dispara el heartbeat de connector |
@@ -62,7 +62,7 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 | E5: spec, milestones, tabla de AI logs, UML y docs del flujo v3 | RDOC02, RDOC03 | 2026-11-06 | Cumplido (PR #29); se actualiza con los PRs del mercado |
 | E6: escenario de punta a punta, ensayo de caída y guardián de ciclos | G03 | 2026-11-06 | Cumplido (PR #29). El escenario pasa hasta el reporte; la parte del mercado espera a C y D |
 | E7: scripts de las anomalías 1 a 7 ([scripts/ensayos/README.md](../scripts/ensayos/README.md)) | Demo | 2026-11-06 | Cumplido (PR #29). 5, 6 y 7 pasan; el resto espera a A2, C y D |
-| Post-mortems de AD1 (A8), AD2 (B7) y AD3 (D8) | RDOC01 | Después de la demo | Pendiente |
+| Post-mortems de AD1 (A8), AD2 (B7) y AD3 (D8) | RDOC01 | — | Parcial: Post-mortem de AD1 (A8) completado en ADR-0001; B7 y D8 pendientes de cierre |
 
 ## Entrega E1
 

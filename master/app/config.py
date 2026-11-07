@@ -3,7 +3,24 @@
 from functools import lru_cache
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+except ImportError:
+    import os
+    from pydantic import BaseModel
+
+    def SettingsConfigDict(**kwargs):  # noqa: N802
+        return kwargs
+
+    class BaseSettings(BaseModel):  # type: ignore
+        def __init__(self, **kwargs):
+            env_kwargs = {}
+            for field_name in self.__class__.model_fields:
+                env_val = os.environ.get(field_name.upper())
+                if env_val is not None:
+                    env_kwargs[field_name] = env_val
+            env_kwargs.update(kwargs)
+            super().__init__(**env_kwargs)
 
 
 class Settings(BaseSettings):

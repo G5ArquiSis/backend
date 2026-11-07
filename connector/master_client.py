@@ -54,17 +54,31 @@ class MasterClient:
         response = self._post(f"{self._base_url}/internal/messages", mensaje, rejects=True)
         return response.json().get("outcome", "applied")
 
-    def guardar_log_master(self, categoria: str, mensaje_evento: str, reason: str | None) -> bool:
+    def guardar_log_master(
+        self,
+        categoria: str,
+        mensaje_evento: str,
+        reason: str | None,
+        sender_city: str | None = None,
+        sender_user_id: str | None = None,
+    ) -> bool:
         """Deja constancia de un mensaje descartado o respondido con NACK (RF05).
 
         No levanta: perder una línea del registro no justifica reencolar ni botar
         el consumo. Devuelve si quedó guardado.
         """
+        payload: dict[str, Any] = {
+            "category": categoria,
+            "rawContent": mensaje_evento,
+            "reason": reason,
+        }
+        if sender_city:
+            payload["senderCity"] = sender_city
+        if sender_user_id:
+            payload["senderUserId"] = sender_user_id
+
         try:
-            self._post(
-                f"{self._base_url}/internal/message-log",
-                {"category": categoria, "rawContent": mensaje_evento, "reason": reason},
-            )
+            self._post(f"{self._base_url}/internal/message-log", payload)
         except MasterUnavailableError as error:
             logger.error("No se pudo registrar el mensaje %s: %s", categoria, error)
             return False
