@@ -1,6 +1,6 @@
 # Plan de milestones
 
-> RDOC02. Actualizado el 2026-11-07, después del merge de los PRs del mercado (C y D). Las fechas de lo cumplido son las de su merge a `main` o de
+> RDOC02. Actualizado el 2026-11-07, después del merge de los PRs del mercado (C y D) y con los PR #42 y #44. Las fechas de lo cumplido son las de su merge a `main` o de
 > su puesta en producción; las de lo pendiente y en revisión son la fecha objetivo. Las tareas de
 > la E2 siguen la numeración del reparto por roles (A0 a E7). Se actualiza en cada hito.
 
@@ -25,18 +25,18 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 
 | Tarea | Requisito | Fecha | Estado |
 |---|---|---|---|
-| A1: consumidor de `market.TAL` | G02 | — | En revisión (PR #28) |
-| A2: reglas de recepción de otras ciudades (`IDENTITY_MISMATCH`) y tipos retirados | G02, RF03 | — | En revisión (PR #28) |
-| A3: publicación al exchange `market`, a `city.{CODE}` y a la central, con límite de tasa | RF03 | — | En revisión (PR #28) |
-| A4: migración de la tabla outbox | RF03 | — | En revisión (PR #28) |
+| A1: consumidor de `market.TAL` | G02 | 2026-11-06 | Cumplido (PR #28) |
+| A2: reglas de recepción de otras ciudades (`IDENTITY_MISMATCH`) y tipos retirados | G02, RF03 | 2026-11-06 | Cumplido (PR #28). El destino de los NACK y el bid sin `user_id` se corrigen en el PR #44 (anomalía 2) |
+| A3: publicación al exchange `market`, a `city.{CODE}` y a la central, con límite de tasa | RF03 | 2026-11-06 | Cumplido (PR #28) |
+| A4: migración de la tabla outbox | RF03 | 2026-11-06 | Cumplido (PR #28) |
 | A5: schemas JSON de los mensajes E2 | RDOC04 | 2026-11-07 | Cumplido: schemas en `contratos` (PR #5) y validación en el backend (PR #25) |
-| A6: simulador de mercado | Pruebas | — | En revisión (PR #25) |
-| A7: RF05 con los mensajes de la E2 | RF05 | — | Parcial: el registro de la E1 (`/message-log`) está en `main`; falta lo de otras ciudades |
+| A6: simulador de mercado | Pruebas | 2026-11-07 | Cumplido (PR #25) |
+| A7: RF05 con los mensajes de la E2 | RF05 | — | En revisión (PR #43, contratos PR #10, frontend PR #12) |
 | B1: `WalletClient` real, idempotente y tolerante a 202, 429, 502 y 504 | RF03 | 2026-11-06 | Cumplido (PR #21, #27) |
 | B2: eventos de wallet aplicados una sola vez y en cualquier orden | RF03, RF05 | 2026-11-06 | Cumplido (PR #21, #27) |
 | B3: reconciliación con `GET /balance` (AD5) | AD5 | 2026-11-06 | Cumplido (PR #22). La dispara el heartbeat de connector |
 | B4: ciclo autónomo con los mensajes extendidos de la central | G03 | 2026-11-06 | Cumplido (PR #22): el status-statement v3 fija el plazo del reporte con `market.reportOpensAt` e `imbalance-settlement` se aplica. Se verifica en producción al encender los flags (M6) |
-| B5: RF01, historial de ciclos completo | RF01 | — | Pendiente |
+| B5: RF01, historial de ciclos completo | RF01 | — | En revisión (frontend PR #13): oferta, bids enviados y recibidos con su resultado, swaps con transporte e `imbalance-settlement`, sobre los datos de `/cycles/{id}` que ya están en `main` |
 | B6: tests de idempotencia, desorden y reconciliación | RF05 | 2026-11-06 | Parcial: tests de la wallet en `main` (PR #27) |
 | C2 a C5: oferta propia, bids en serie (AD4), swap del vendedor y estrategia | G04, RF04 | 2026-11-07 | Cumplido (PR #34, #35, #36 y #38; contratos PR #9) |
 | C6: RF04, pantalla de administración del mercado | RF04 | — | En revisión (frontend PR #11) |
@@ -60,8 +60,8 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 | Tarea | Requisito | Fecha | Estado |
 |---|---|---|---|
 | E5: spec, milestones, tabla de AI logs, UML y docs del flujo v3 | RDOC02, RDOC03 | 2026-11-06 | Cumplido (PR #29); se actualiza con los PRs del mercado |
-| E6: escenario de punta a punta, ensayo de caída y guardián de ciclos | G03 | 2026-11-06 | Cumplido (PR #29). El escenario pasa hasta el reporte; la parte del mercado espera a C y D |
-| E7: scripts de las anomalías 1 a 7 ([scripts/ensayos/README.md](../scripts/ensayos/README.md)) | Demo | 2026-11-06 | Cumplido (PR #29). 5, 6 y 7 pasan; el resto espera a A2, C y D |
+| E6: escenario de punta a punta, ensayo de caída y guardián de ciclos | G03 | 2026-11-07 | Cumplido (PR #29). El escenario pasa entero en los dos sentidos (TAL vende y TAL compra) |
+| E7: scripts de las anomalías 1 a 7 ([scripts/ensayos/README.md](../scripts/ensayos/README.md)) | Demo | 2026-11-07 | Cumplido (PR #29 y PR #44): las siete pasan en local sobre `main` con C y D |
 | Post-mortems de AD1 (A8), AD2 (B7) y AD3 (D8) | RDOC01 | Después de la demo | Pendiente |
 
 ## Entrega E1
