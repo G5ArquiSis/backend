@@ -178,7 +178,15 @@ async def _apply_status_statement(
         energy_delta=Decimal(0),
         budget_delta=Decimal(0),
     )
-    return APPLIED if recorded else DUPLICATE
+    if not recorded:
+        return DUPLICATE
+
+    # Rol C: crear la oferta en la misma transacción que persiste la apertura del
+    # ciclo y su status-statement. El módulo vendedor no modifica la proyección B.
+    from app.market.seller import ensure_offer_for_cycle
+
+    await ensure_offer_for_cycle(session, message, now, settings)
+    return APPLIED
 
 
 async def _apply_transfer(
@@ -1014,4 +1022,5 @@ def _number(value: Decimal) -> int | float:
 
 
 # Los handlers v3 se registran desde su propio módulo; no se edita el diccionario E1.
+from app.market import seller as _seller_handlers  # noqa: E402,F401
 from app.wallet import eventos as _wallet_handlers  # noqa: E402,F401
