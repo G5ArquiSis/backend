@@ -17,7 +17,7 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 | A0: contrato I1, outbox con destino (`CENTRAL`, `MARKET_OFFER`, `CITY(code)`) | RF03 | 2026-11-06 | Cumplido (PR #24) |
 | B0: contrato I2, interfaz de `WalletClient` y registro de handlers | RF03 | 2026-11-05 | Cumplido (PR #21) |
 | C0: contrato I3, modelo de estrategia | AD6 | — | En revisión (PR #31); el comprador ya lo usa |
-| D0: contrato I4, lectura del libro de ofertas | RF02 | — | En revisión (PR #PR_D) |
+| D0: contrato I4, lectura del libro de ofertas | RF02 | — | En revisión (PR #37) |
 | B7: ADR de AD5 (consistencia wallet-ledger) | RDOC01 | 2026-11-06 | Cumplido (PR #26). Se mergeó después que el código del PR #21 |
 | C1: ADRs de AD4 (atención de bids) y AD6 (estrategia) | RDOC01 | — | Pendiente; deben entrar antes que el código de C |
 
@@ -39,7 +39,7 @@ falta), **En revisión** (PR abierto), **Pendiente**.
 | B5: RF01, historial de ciclos completo | RF01 | — | Pendiente |
 | B6: tests de idempotencia, desorden y reconciliación | RF05 | 2026-11-06 | Parcial: tests de la wallet en `main` (PR #27) |
 | C2 a C6: oferta propia, bids en serie (AD4), swap del vendedor, estrategia y RF04 | G04, RF04 | — | Pendiente |
-| D1 a D6: libro de ofertas, RF02, motor comprador, verificación del token, RF06 | G04, RF02, RF06 | — | En revisión (PR #PR_D, contratos PR #PR_C, frontend PR #PR_F). Detalle en [comprador.md](comprador.md) |
+| D1 a D6: libro de ofertas, RF02, motor comprador, verificación del token, RF06 | G04, RF02, RF06 | — | En revisión (PR #37, contratos PR #8, frontend PR #10). Detalle en [comprador.md](comprador.md) |
 | E1: wallet y broker simulados (`scripts/fake_wallet/`) | Pruebas | 2026-11-06 | Cumplido (PR #29) |
 | E2: métricas de mercado y wallet en New Relic, dashboard y alertas | G08, RNF05 | 2026-11-06 | Cumplido (PR #29). Dashboard importado y seis alertas creadas en la política "EnergyShark E2", con aviso por email; la del feed del mercado queda desactivada hasta encender `MARKET_ENABLED` |
 | E3: rollback del deploy y verificación de requisitos esenciales | G01, RNF04 | 2026-11-06 | Cumplido (PR #29) |
