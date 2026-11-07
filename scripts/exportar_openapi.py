@@ -78,7 +78,7 @@ ERROR_SCHEMA = {
 def build_spec() -> dict:
     spec = app.openapi()
 
-    spec["info"] = {"title": "EnergyShark E1 API", "version": "1.0.0", "description": DESCRIPTION}
+    spec["info"] = {"title": "EnergyShark E2 API", "version": "2.0.0", "description": DESCRIPTION}
     spec["servers"] = [
         {"url": "https://api.melchort.me", "description": "Producción (API Gateway)"},
         {"url": "http://127.0.0.1:8001", "description": "Local (master-1, sin JWT)"},

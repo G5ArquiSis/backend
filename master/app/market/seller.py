@@ -307,6 +307,87 @@ async def set_offer_remaining(
     return True
 
 
+async def restore_offer_remaining(
+    session: AsyncSession,
+    cycle_id: str,
+    remaining: int,
+    now: datetime,
+    settings: Settings,
+) -> bool:
+    """Devuelve al libro local una reserva de kWh que no llegó a liquidarse.
+
+    El estado local se corrige incluso si la ventana de publicación ya terminó.
+    Si la oferta todavía admite actualizaciones públicas, el cambio se publica
+    en la misma transacción.
+    """
+    value = _whole_kwh(remaining)
+    offer = await _find_offer_for_update(session, cycle_id)
+    if offer is None:
+        return False
+    if value > (offer.quantity or 0):
+        raise ValueError("remaining no puede superar la cantidad publicada")
+    if value == offer.remaining:
+        return False
+
+    offer.remaining = value
+    if (
+        settings.market_enabled
+        and offer.status == ACTIVE
+        and offer.market_closed_at is None
+    ):
+        await _publish(
+            session,
+            offer,
+            "offer-updated",
+            {
+                "offerId": offer.offer_id,
+                "remaining": value,
+                "pricePerEnergy": _json_number(offer.price_per_energy),
+            },
+            now,
+            settings,
+        )
+    else:
+        offer.updated_at = now
+    return True
+
+
+async def publish_current_offer_remaining(
+    session: AsyncSession,
+    cycle_id: str,
+    now: datetime,
+    settings: Settings,
+) -> bool:
+    """Publica el remaining ya reservado cuando Wallet confirma la liquidación.
+
+    La cantidad se descontó al aceptar el bid; por eso, en el evento settled,
+    el valor almacenado no cambia, pero sí debe publicarse una nueva versión.
+    """
+    if not settings.market_enabled:
+        return False
+    offer = await _find_offer_for_update(session, cycle_id)
+    if (
+        offer is None
+        or offer.status != ACTIVE
+        or offer.market_closed_at is not None
+    ):
+        return False
+
+    await _publish(
+        session,
+        offer,
+        "offer-updated",
+        {
+            "offerId": offer.offer_id,
+            "remaining": offer.remaining,
+            "pricePerEnergy": _json_number(offer.price_per_energy),
+        },
+        now,
+        settings,
+    )
+    return True
+
+
 async def change_offer_price(
     session: AsyncSession,
     cycle_id: str,

@@ -84,11 +84,38 @@ async def apply_wallet_event(session, message, now, settings):
     if inserted.scalar_one_or_none() is None:
         return DUPLICATE
 
+    if message["type"] == "swap-proposed":
+        from app.market.swaps import apply_swap_proposed
+
+        await apply_swap_proposed(
+            session,
+            message,
+            now,
+            settings,
+        )
+
+    if message["type"] in {"swap-settled", "swap-rejected", "swap-expired", "swap-cancelled"}:
+        from app.market.swaps import apply_swap_terminal_event
+
+        await apply_swap_terminal_event(session, message, now, settings)
+
     if message["type"] == "market-closed":
         if not cycle_id:
             raise ValueError("market-closed requiere cycleId")
         await market_seller.close_market(session, cycle_id, now)
 
+    # El handler puede haber descubierto el ciclo al correlacionar el swap
+    # con un bid, aunque el evento original no trajera cycleId.
+    if not cycle_id and swap_id:
+        link = await session.get(
+            WalletSwapCycle,
+            swap_id,
+            populate_existing=True,
+        )
+        cycle_id = link.cycle_id if link else None
+
+        if cycle_id:
+            await _ensure_cycle(session, cycle_id, now)
     if cycle_id:
         cycle = await session.get(CycleLedger, cycle_id)
         if cycle is not None:

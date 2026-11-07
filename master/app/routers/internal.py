@@ -62,8 +62,10 @@ async def claim_pending_messages(
     persistidos y encola lo que venció: el negotiation-report del ciclo y los
     reintentos de propuestas. Esa revisión es el reloj del sistema (ADR de AD3).
     """
+    from app.market.swaps import process_reserved_bids
     from app.wallet.scheduler import reconcile_due
 
+    background_tasks.add_task(process_reserved_bids, settings)
     background_tasks.add_task(reconcile_due, settings)
     now = datetime.now(UTC)
     await run_due_work(session, now, settings)

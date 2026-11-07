@@ -14,7 +14,12 @@ from app.cycle_repository import APPLIED, DUPLICATE, apply_central_message
 from app.database import _session_factory
 from app.market.models import SellerBid, SellerOffer
 from app.market.seller import ACTIVE, withdraw_offer
-from app.models import OutboxMessage
+from app.market.swaps import (
+    reconcile_pending_swap_events,
+    reconcile_pending_swap_proposals,
+)
+from app.models import OutboxMessage, WalletEvent
+from app.wallet.correlation import register_swap_cycle
 
 pytestmark = pytest.mark.integration
 
@@ -335,3 +340,347 @@ async def test_two_concurrent_bids_cannot_reserve_the_same_remaining(db: AsyncSe
     offer = (await db.execute(select(SellerOffer))).scalar_one()
     await db.refresh(offer)
     assert offer.remaining == 200
+
+async def test_swap_proposed_arrives_before_http_response_is_reconciled(
+    db: AsyncSession,
+) -> None:
+    await open_offer(db)
+
+    assert await apply_central_message(
+        db,
+        bid_message(quantity=200),
+        NOW + timedelta(seconds=1),
+        SETTINGS,
+    ) == APPLIED
+
+    bid = (await db.execute(select(SellerBid))).scalar_one()
+    assert bid.status == "reserved"
+    assert bid.swap_id is None
+
+    swap_id = "swap-c4-race-001"
+    expires_at = NOW + timedelta(seconds=60)
+
+    # Simulamos que Wallet notifica el swap antes de que el worker
+    # haya recibido y persistido la respuesta HTTP.
+    wallet_event = {
+        "idpk": "wallet-event-race-001",
+        "msgId": "wallet-msg-race-001",
+        "sender": "central",
+        "type": "swap-proposed",
+        "timestamp": (
+            NOW + timedelta(seconds=2)
+        ).isoformat().replace("+00:00", "Z"),
+        "data": {
+            "swapId": swap_id,
+            "token": "token-race-001",
+            "expiresAt": expires_at.isoformat().replace("+00:00", "Z"),
+            # Intencionalmente no incluimos data.idpk.
+        },
+    }
+
+    assert await apply_central_message(
+        db,
+        wallet_event,
+        NOW + timedelta(seconds=2),
+        SETTINGS,
+    ) == APPLIED
+
+    await db.refresh(bid)
+
+    # El evento quedó registrado, pero todavía no pudo aceptar el bid.
+    assert bid.status == "reserved"
+    assert bid.swap_id is None
+
+    stored_event = (
+        await db.execute(
+            select(WalletEvent).where(
+                WalletEvent.idpk == "wallet-event-race-001"
+            )
+        )
+    ).scalar_one()
+
+    assert stored_event.swap_id == swap_id
+
+    # Simulamos que posteriormente llega la respuesta HTTP con swapId.
+    await register_swap_cycle(db, swap_id, bid.cycle_id)
+    bid.swap_id = swap_id
+    await db.commit()
+
+    # La reconciliación recupera el evento que había quedado pendiente.
+    processed = await reconcile_pending_swap_proposals(
+        db,
+        NOW + timedelta(seconds=3),
+        SETTINGS,
+    )
+    await db.commit()
+
+    await db.refresh(bid)
+
+    assert processed == 1
+    assert bid.status == "proposed"
+    assert bid.swap_id == swap_id
+
+    accepted = (
+        await db.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.dedupe_key
+                == "seller-bid:bid-corr-001:accepted"
+            )
+        )
+    ).scalar_one()
+
+    assert accepted.payload["type"] == "bid-accepted"
+    assert accepted.payload["data"]["swapId"] == swap_id
+    assert accepted.payload["data"]["swapToken"] == "token-race-001"
+
+    # Una segunda reconciliación no vuelve a procesar el bid.
+    processed_again = await reconcile_pending_swap_proposals(
+        db,
+        NOW + timedelta(seconds=4),
+        SETTINGS,
+    )
+    await db.commit()
+
+    assert processed_again == 0
+
+async def _create_proposed_bid(
+    db: AsyncSession,
+    *,
+    swap_id: str = "swap-c4-terminal-001",
+    quantity: int = 200,
+) -> SellerBid:
+    await open_offer(db)
+    assert await apply_central_message(
+        db, bid_message(quantity=quantity), NOW + timedelta(seconds=1), SETTINGS
+    ) == APPLIED
+    bid = (await db.execute(select(SellerBid))).scalar_one()
+    proposed = {
+        "idpk": f"wallet-proposed-{swap_id}",
+        "msgId": f"wallet-proposed-msg-{swap_id}",
+        "sender": "central",
+        "type": "swap-proposed",
+        "timestamp": (NOW + timedelta(seconds=2)).isoformat().replace("+00:00", "Z"),
+        "data": {
+            "swapId": swap_id,
+            "idpk": bid.idpk,
+            "token": "signed-token",
+            "expiresAt": (NOW + timedelta(seconds=60)).isoformat().replace("+00:00", "Z"),
+        },
+    }
+    assert await apply_central_message(
+        db, proposed, NOW + timedelta(seconds=2), SETTINGS
+    ) == APPLIED
+    await db.refresh(bid)
+    assert bid.status == "proposed"
+    return bid
+
+
+async def test_swap_settled_publishes_reserved_remaining_once(db: AsyncSession) -> None:
+    bid = await _create_proposed_bid(db)
+    settled = {
+        "idpk": "wallet-settled-terminal-001",
+        "msgId": "wallet-settled-msg-terminal-001",
+        "sender": "central",
+        "type": "swap-settled",
+        "timestamp": (NOW + timedelta(seconds=3)).isoformat().replace("+00:00", "Z"),
+        "data": {"swapId": bid.swap_id, "idpk": bid.idpk},
+    }
+
+    assert await apply_central_message(
+        db, settled, NOW + timedelta(seconds=3), SETTINGS
+    ) == APPLIED
+    await db.refresh(bid)
+    offer = (await db.execute(select(SellerOffer))).scalar_one()
+    await db.refresh(offer)
+    assert bid.status == "settled"
+    assert offer.remaining == 400
+
+    updates = (
+        await db.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.payload["type"].astext == "offer-updated"
+            )
+        )
+    ).scalars().all()
+    assert len(updates) == 1
+    assert updates[0].payload["data"]["remaining"] == 400
+
+    # Otro idpk para el mismo hecho no vuelve a publicar la actualización.
+    duplicate_fact = {**settled, "idpk": "wallet-settled-terminal-002"}
+    assert await apply_central_message(
+        db, duplicate_fact, NOW + timedelta(seconds=4), SETTINGS
+    ) == APPLIED
+    updates = (
+        await db.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.payload["type"].astext == "offer-updated"
+            )
+        )
+    ).scalars().all()
+    assert len(updates) == 1
+
+
+@pytest.mark.parametrize(
+    ("event_type", "terminal_status", "external_idpk"),
+    [
+        ("swap-expired", "expired", None),
+        ("swap-cancelled", "cancelled", "central-disable-kwh-operation"),
+    ],
+)
+async def test_failed_swap_releases_reserved_quantity(
+    db: AsyncSession,
+    event_type: str,
+    terminal_status: str,
+    external_idpk: str | None,
+) -> None:
+    bid = await _create_proposed_bid(db)
+    data = {"swapId": bid.swap_id}
+    if external_idpk is not None:
+        data["idpk"] = external_idpk
+    event = {
+        "idpk": f"wallet-{terminal_status}-001",
+        "msgId": f"wallet-{terminal_status}-msg-001",
+        "sender": "central",
+        "type": event_type,
+        "timestamp": (NOW + timedelta(seconds=3)).isoformat().replace("+00:00", "Z"),
+        "data": data,
+    }
+
+    assert await apply_central_message(
+        db, event, NOW + timedelta(seconds=3), SETTINGS
+    ) == APPLIED
+    await db.refresh(bid)
+    offer = (await db.execute(select(SellerOffer))).scalar_one()
+    await db.refresh(offer)
+    assert bid.status == terminal_status
+    assert offer.remaining == 600
+
+    updates = (
+        await db.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.payload["type"].astext == "offer-updated"
+            )
+        )
+    ).scalars().all()
+    assert len(updates) == 1
+    assert updates[0].payload["data"]["remaining"] == 600
+
+
+async def test_proposal_rejection_becomes_bid_rejected_and_releases_quantity(
+    db: AsyncSession,
+) -> None:
+    await open_offer(db)
+    assert await apply_central_message(
+        db, bid_message(quantity=200), NOW + timedelta(seconds=1), SETTINGS
+    ) == APPLIED
+    bid = (await db.execute(select(SellerBid))).scalar_one()
+
+    rejected = {
+        "idpk": "wallet-proposal-rejected-001",
+        "msgId": "wallet-proposal-rejected-msg-001",
+        "sender": "central",
+        "type": "swap-rejected",
+        "timestamp": (NOW + timedelta(seconds=2)).isoformat().replace("+00:00", "Z"),
+        "data": {
+            "swapId": "swap-c4-proposal-rejected",
+            "idpk": bid.idpk,
+            "reason": "INSUFFICIENT_ASSET",
+        },
+    }
+    assert await apply_central_message(
+        db, rejected, NOW + timedelta(seconds=2), SETTINGS
+    ) == APPLIED
+
+    await db.refresh(bid)
+    offer = (await db.execute(select(SellerOffer))).scalar_one()
+    await db.refresh(offer)
+    assert bid.status == "rejected"
+    assert bid.reason == "INSUFFICIENT_ASSET"
+    assert offer.remaining == 600
+
+    response = (
+        await db.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.dedupe_key == f"seller-bid:{bid.idpk}:rejected"
+            )
+        )
+    ).scalar_one()
+    assert response.payload["type"] == "bid-rejected"
+    assert response.payload["reason"] == "INSUFFICIENT_ASSET"
+    assert response.payload["data"]["target"] == bid.msg_id
+
+
+async def test_accept_rejection_releases_kwh_without_second_bid_rejected(
+    db: AsyncSession,
+) -> None:
+    bid = await _create_proposed_bid(db)
+    rejected = {
+        "idpk": "wallet-accept-rejected-001",
+        "msgId": "wallet-accept-rejected-msg-001",
+        "sender": "central",
+        "type": "swap-rejected",
+        "timestamp": (NOW + timedelta(seconds=3)).isoformat().replace("+00:00", "Z"),
+        "data": {
+            "swapId": bid.swap_id,
+            "idpk": "buyer-accept-operation-001",
+            "reason": "INSUFFICIENT_ASSET",
+        },
+    }
+    assert await apply_central_message(
+        db, rejected, NOW + timedelta(seconds=3), SETTINGS
+    ) == APPLIED
+    await db.refresh(bid)
+    offer = (await db.execute(select(SellerOffer))).scalar_one()
+    await db.refresh(offer)
+
+    assert bid.status == "rejected"
+    assert offer.remaining == 600
+    assert (
+        await db.execute(
+            select(OutboxMessage).where(
+                OutboxMessage.dedupe_key == f"seller-bid:{bid.idpk}:rejected"
+            )
+        )
+    ).scalar_one_or_none() is None
+
+
+async def test_terminal_event_before_http_swap_mapping_is_reconciled(
+    db: AsyncSession,
+) -> None:
+    await open_offer(db)
+    assert await apply_central_message(
+        db, bid_message(quantity=200), NOW + timedelta(seconds=1), SETTINGS
+    ) == APPLIED
+    bid = (await db.execute(select(SellerBid))).scalar_one()
+    swap_id = "swap-c4-late-terminal"
+    expired = {
+        "idpk": "wallet-expired-before-http-001",
+        "msgId": "wallet-expired-before-http-msg-001",
+        "sender": "central",
+        "type": "swap-expired",
+        "timestamp": (NOW + timedelta(seconds=3)).isoformat().replace("+00:00", "Z"),
+        "data": {"swapId": swap_id},
+    }
+
+    assert await apply_central_message(
+        db, expired, NOW + timedelta(seconds=3), SETTINGS
+    ) == APPLIED
+    await db.refresh(bid)
+    assert bid.status == "reserved"
+    assert bid.swap_id is None
+
+    await register_swap_cycle(db, swap_id, bid.cycle_id)
+    bid.swap_id = swap_id
+    await db.commit()
+
+    processed = await reconcile_pending_swap_events(
+        db, NOW + timedelta(seconds=4), SETTINGS
+    )
+    await db.commit()
+    await db.refresh(bid)
+    offer = (await db.execute(select(SellerOffer))).scalar_one()
+    await db.refresh(offer)
+
+    assert processed == 1
+    assert bid.status == "expired"
+    assert offer.remaining == 600
