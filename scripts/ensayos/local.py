@@ -300,6 +300,33 @@ def mercado_comprador(central: Broker, prefijo: str, mercado: float = 120) -> st
     return ciclo
 
 
+def mercado_vendedor(central: Broker, prefijo: str, mercado: float = 120) -> str:
+    """Ciclo nuevo en que TAL tiene excedente (13 000 kWh vendibles) y esos kWh en la cuenta, con
+    el mercado abierto `mercado` segundos y una ruta habilitada a HGW. Devuelve el cycleId.
+
+    En la central real los kWh generados llegan a la wallet al empezar el ciclo; la wallet falsa
+    no lo hace, así que se cargan a mano. Sin ellos la wallet rechaza la propuesta del swap.
+    """
+    ciclo = ciclo_nuevo(prefijo)
+    wallet_admin("POST", "/accounts/TAL", {"kwh": 13000})
+    central.a_ciudad(
+        "TAL",
+        status_statement(ciclo, mercado=mercado, cierre=120, generacion=26000, consumo=13000),
+    )
+    central.a_ciudad(
+        "TAL",
+        mensaje(
+            "distance-table",
+            {
+                "distances": {"HGW": {"distance": 4500, "transportCost": 0.0034, "enabled": True}},
+                "disabledRouteTransportCost": 0.034,
+            },
+            ciclo=ciclo,
+        ),
+    )
+    return ciclo
+
+
 def ciclo_nuevo(prefijo: str) -> str:
     """Un ciclo propio del ensayo, también como ciclo de la wallet falsa."""
     ciclo = f"cycle-{prefijo}-{int(time.time())}"
