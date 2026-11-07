@@ -13,8 +13,8 @@ from sqlalchemy import and_, or_, select, update
 from app.config import Settings
 from app.database import _session_factory
 from app.ledger import total_amount
-from app.market.models import SellerBid
 from app.market import seller as market_seller
+from app.market.models import SellerBid
 from app.models import WalletEvent
 from app.outbox import Destination, enqueue_publish
 from app.wallet.client import WalletClient, WalletError
