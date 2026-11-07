@@ -74,6 +74,15 @@ class SellerBid(Base):
     available: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     reserved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    swap_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    swap_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    proposal_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

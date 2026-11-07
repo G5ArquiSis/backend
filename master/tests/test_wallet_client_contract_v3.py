@@ -32,3 +32,43 @@ async def test_write_requires_idempotency_key():
                             (lambda _: httpx.Response(202, json={}))) as client:
         with pytest.raises(ValueError, match="Idempotency-Key"):
             await client.accept_swap("s-1", "")
+
+@pytest.mark.asyncio
+async def test_propose_swap_sends_correct_payload_and_idempotency_key():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(202, json={"swapId": "s-1"})
+
+    async with WalletClient(
+        "https://wallet.example/v1",
+        "secret",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        result = await client.propose_swap(
+            give={"asset": "kwh", "amount": 10},
+            take={"asset": "credits", "amount": 100},
+            expires_at="2026-11-06T23:00:00Z",
+            memo="offer-1",
+            idempotency_key="bid-1",
+        )
+
+    assert result["swapId"] == "s-1"
+    assert len(requests) == 1
+
+    request = requests[0]
+
+    assert request.method == "POST"
+    assert request.url.path == "/v1/swaps"
+    assert request.headers["Idempotency-Key"] == "bid-1"
+    assert request.headers["X-Api-Key"] == "secret"
+
+    import json
+
+    assert json.loads(request.content) == {
+        "give": {"asset": "kwh", "amount": 10},
+        "take": {"asset": "credits", "amount": 100},
+        "expiresAt": "2026-11-06T23:00:00Z",
+        "memo": "offer-1",
+    }

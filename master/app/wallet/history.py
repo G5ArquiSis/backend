@@ -73,8 +73,7 @@ def swap_states(events):
         row["events"].append(event)
         definitive_rejection = (
             event["type"] == "swap-rejected"
-            and event.get("reason") == "INSUFFICIENT_ASSET"
-            and data.get("operation") in ("propose", "accept")
+            and data.get("reason", event.get("reason")) == "INSUFFICIENT_ASSET"
         )
         if event["type"] in priority and (event["type"] != "swap-rejected" or definitive_rejection):
             previous = row.get("lastEvent", {}).get("type")
