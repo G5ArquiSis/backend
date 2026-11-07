@@ -182,13 +182,18 @@ class MessageLog(Base):
     message_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sender_city: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    sender_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Texto y no JSONB: un mensaje descartado puede no ser JSON válido.
     raw_content: Mapped[str] = mapped_column(Text)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
-    __table_args__ = (Index("ix_message_log_received_at", "received_at"),)
+    __table_args__ = (
+        Index("ix_message_log_received_at", "received_at"),
+        Index("ix_message_log_sender_city", "sender_city"),
+    )
 
 
 class DistanceTable(Base):

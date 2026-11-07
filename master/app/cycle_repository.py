@@ -815,15 +815,56 @@ async def current_distance_table(session: AsyncSession) -> DistanceTable | None:
     return found.scalar_one_or_none()
 
 
+def _build_message_log_filters(
+    category: str | None = None,
+    city_id: str | None = None,
+    message_type: str | None = None,
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+) -> list:
+    conditions = []
+    if category is not None:
+        conditions.append(MessageLog.category == category)
+    if city_id is not None and city_id.strip():
+        conditions.append(func.upper(MessageLog.sender_city) == city_id.strip().upper())
+    if message_type is not None and message_type.strip():
+        conditions.append(MessageLog.message_type == message_type.strip())
+    if from_date is not None:
+        conditions.append(MessageLog.received_at >= from_date)
+    if to_date is not None:
+        conditions.append(MessageLog.received_at <= to_date)
+    return conditions
+
+
 async def record_unapplied_message(
-    session: AsyncSession, category: str, raw_content: str, reason: str | None
+    session: AsyncSession,
+    category: str,
+    raw_content: str,
+    reason: str | None,
+    sender_city: str | None = None,
+    sender_user_id: str | None = None,
 ) -> MessageLog:
-    """Deja constancia de un mensaje duplicado, descartado o respondido con NACK.
+    """Deja constancia de un mensaje duplicado, descartado o respondido con NACK (RF05).
 
     Los campos del envelope se extraen si el contenido se puede parsear; un
     mensaje descartado puede no ser JSON, y entonces se guarda solo el texto.
     """
     envelope = _parse_envelope(raw_content)
+
+    resolved_city = (
+        sender_city
+        or _text_or_none(envelope.get("cityId"))
+        or _text_or_none(envelope.get("sender"))
+    )
+    if not resolved_city and isinstance(envelope.get("data"), dict):
+        resolved_city = _text_or_none(envelope.get("data", {}).get("cityId"))
+
+    resolved_user_id = (
+        sender_user_id
+        or _text_or_none(envelope.get("userId"))
+        or _text_or_none(envelope.get("user_id"))
+    )
+
     entry = MessageLog(
         category=category,
         idpk=_text_or_none(envelope.get("idpk")),
@@ -831,6 +872,8 @@ async def record_unapplied_message(
         message_type=_text_or_none(envelope.get("type")),
         cycle_id=_text_or_none(envelope.get("cycleId")),
         reason=reason[:128] if reason else None,
+        sender_city=resolved_city[:64] if resolved_city else None,
+        sender_user_id=resolved_user_id[:64] if resolved_user_id else None,
         raw_content=raw_content,
     )
     session.add(entry)
@@ -839,23 +882,61 @@ async def record_unapplied_message(
 
 
 async def list_message_log(
-    session: AsyncSession, category: str | None, limit: int, offset: int
+    session: AsyncSession,
+    category: str | None = None,
+    city_id: str | None = None,
+    message_type: str | None = None,
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+    limit: int = 25,
+    offset: int = 0,
 ) -> Sequence[MessageLog]:
-    """Registro de mensajes no aplicados, del más reciente al más antiguo, siempre acotado."""
+    """Registro de mensajes no aplicados con filtros y paginación."""
     statement = select(MessageLog)
-    if category is not None:
-        statement = statement.where(MessageLog.category == category)
+    conditions = _build_message_log_filters(category, city_id, message_type, from_date, to_date)
+    if conditions:
+        statement = statement.where(*conditions)
     statement = statement.order_by(MessageLog.id.desc()).limit(limit).offset(offset)
 
     return (await session.execute(statement)).scalars().all()
 
 
-async def count_message_log(session: AsyncSession, category: str | None) -> int:
+async def count_message_log(
+    session: AsyncSession,
+    category: str | None = None,
+    city_id: str | None = None,
+    message_type: str | None = None,
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+) -> int:
     statement = select(func.count(MessageLog.id))
-    if category is not None:
-        statement = statement.where(MessageLog.category == category)
+    conditions = _build_message_log_filters(category, city_id, message_type, from_date, to_date)
+    if conditions:
+        statement = statement.where(*conditions)
 
     return (await session.execute(statement)).scalar_one()
+
+
+async def get_message_log_counts(
+    session: AsyncSession,
+    city_id: str | None = None,
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+) -> dict[str, int]:
+    """Contadores agregados por categoría para alimentar las métricas en la UI (RF05)."""
+    statement = select(MessageLog.category, func.count(MessageLog.id))
+    conditions = _build_message_log_filters(None, city_id, None, from_date, to_date)
+    if conditions:
+        statement = statement.where(*conditions)
+    statement = statement.group_by(MessageLog.category)
+
+    rows = (await session.execute(statement)).all()
+    counts = {"total": 0, "duplicate": 0, "discarded": 0, "nack": 0}
+    for cat, count in rows:
+        if cat in counts:
+            counts[cat] = count
+        counts["total"] += count
+    return counts
 
 
 async def total_budget(session: AsyncSession) -> Decimal:

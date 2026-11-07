@@ -123,5 +123,29 @@
 - **Correcciones del integrante:** Se corrigieron los dobles de prueba en los tests de `connector` para compatibilidad con `MasterClient` y `Settings`.
 - **Referencia:** Rama `feat/a1-a4-mensajeria-protocolo`.
 
+## 2026-11-07 — Registro consultable de mensajes RF05 y Post-mortem de AD1 (Tareas A7 y A8)
+- **Herramienta y modo:** Antigravity, Gemini 3.8 Flash, agéntico.
+- **Tarea:** Implementar el registro ampliado de mensajes no aplicados (RF05) en `master` y `connector`, incorporando ciudad emisora, usuario AMQP, filtros avanzados y contadores agregados (Tarea A7); rediseñar la página `Messages.jsx` en el frontend con métricas, badges y visor de payload crudo (Tarea A7); redactar el post-mortem técnico de la topología de consumo en ADR-0001 (Tarea A8); y actualizar la especificación OpenAPI en `contratos`.
+- **Prompts relevantes:**
+  > "Vamos a cerrar las tareas pendientes del Rol A: implementemos el registro ampliado de mensajes RF05 en master y connector con ciudad emisora y usuario, la pantalla Messages.jsx con filtros y visor de payloads para la demo, dejemos documentado el OpenAPI y escribamos el post-mortem completo de AD1 en el ADR-0001."
+- **Qué produjo la IA:**
+  - `backend/master/app/models.py`: Extensión del modelo `MessageLog` con las columnas `sender_city` y `sender_user_id` e índices correspondientes.
+  - `backend/master/app/migrations/sql/0006_message_log_sender_fields.sql`: Script de migración SQL idempotente para `sender_city`, `sender_user_id` e índices de búsqueda.
+  - `backend/master/app/cycle_schemas.py`: Actualización de DTOs `UnappliedMessageIn`, `MessageLogEntry`, incorporación de `MessageLogCounts` y soporte de contadores en `MessageLogPage`.
+  - `backend/master/app/cycle_repository.py`: Extensión de `record_unapplied_message` con extracción de ciudad y usuario, y filtros multicriterio en `list_message_log`, `count_message_log` y agregador `get_message_log_counts`.
+  - `backend/master/app/routers/negotiations.py`: Endpoint `GET /message-log` actualizado con query parameters `category`, `city_id`, `message_type`, `from_date`, `to_date`, paginación y retorno de contadores.
+  - `backend/master/app/routers/internal.py`: Endpoint interno `POST /internal/message-log` recibiendo `senderCity` y `senderUserId`.
+  - `backend/connector/master_client.py`: Soporte de `sender_city` y `sender_user_id` en `guardar_log_master`.
+  - `backend/connector/consumer.py`: Extracción y reenvío automático de ciudad y usuario AMQP en rechazos (`_reject`) y descartes de mensajes.
+  - `frontend/src/pages/Messages.jsx`: Rediseño completo de la vista RF05 conectada a `useApi()`, con tarjetas métricas de contadores (total, duplicados, descartados, NACKs), barra de filtros interactiva, tabla estructurada con badges, alerta visual para `IDENTITY_MISMATCH` (Anomalía 2 de demo) y modal interactivo para inspección del JSON crudo con copiado al portapapeles.
+  - `frontend/src/App.css`: Reglas de estilo para el modal de inspección de payload y filtros.
+  - `contratos/openapi/openapi.yaml`: Actualización del contrato OpenAPI reflejando los nuevos parámetros de `/message-log` y esquemas de datos.
+  - `backend/docs/adr/0001-topologia-consumo.md`: Redacción íntegra y exhaustiva del Post-mortem de AD1 (Tarea A8), analizando la evolución a tres colas, tradeoffs observados, aciertos de resiliencia y oportunidades de mejora (asyncio, gRPC, batching).
+  - `backend/master/tests/test_message_log.py`: Suite de tests unitarios verificando DTOs, filtros SQL dinámicos, extracción de remitente y agregación de contadores.
+  - `backend/docs/milestones.md`: Actualización del estado de las tareas A7 y A8 a cumplidas en el plan de hitos.
+- **Verificación:** Ejecución limpia de suite de tests `test_message_log.py` (4 tests pasando) y pruebas de connector en `test_v3_protocol.py` y `test_events.py` (18 tests pasando). Verificación de consistencia YAML en `contratos/openapi/openapi.yaml`.
+- **Correcciones del integrante:** Ninguna requerida; implementación integral y verificada.
+- **Referencia:** Rama `feat/a7-a8-rf05-message-log`.
+
 
 
