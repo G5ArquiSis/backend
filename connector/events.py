@@ -10,6 +10,7 @@ Tiene tres partes:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -123,6 +124,22 @@ def construir_solicitud_directa(tipo_pedido: str, city_code: str) -> dict[str, A
     }
 
 
+# Código de ciudad del protocolo (TAL, HGW, MET...).
+_CODIGO_CIUDAD = re.compile(r"^[A-Z]{3}$")
+
+
+def ruta_respuesta(user_id: str | None) -> str | None:
+    """Routing key para responderle a quien publicó, según su `user_id` AMQP.
+
+    RabbitMQ no deja publicar con un `user_id` distinto del usuario de la conexión, así que es
+    el emisor real. Una ciudad (`city.X`) recibe la respuesta en su cola; cualquier otro caso
+    (la central) devuelve None y la respuesta va a la central.
+    """
+    if user_id and user_id.startswith("city."):
+        return user_id
+    return None
+
+
 def validacion_mensaje_entrante(
     body: bytes,
     city_code: str | None = None,
@@ -181,8 +198,10 @@ def validacion_mensaje_entrante(
             cycle_id if isinstance(cycle_id, str) else None,
             city_code,
         )
-        if target_routing_key:
-            nack_obj["_target_routing_key"] = target_routing_key
+        # Sin destino explícito, el NACK va a quien publicó (city.X) y no siempre a la central.
+        destino = target_routing_key or ruta_respuesta(user_id)
+        if destino:
+            nack_obj["_target_routing_key"] = destino
         return (None, nack_obj, None)
 
     # 3. Validación de Identidad (user_id de AMQP) para mensajes punto a punto entre ciudades
@@ -190,7 +209,15 @@ def validacion_mensaje_entrante(
     if sender_city and msg_type in ("bid", "bid-accepted", "bid-rejected"):
         expected_user_id = f"city.{sender_city}"
         if not user_id:
-            # Falta user_id en el mensaje: se descarta y registra (no se sabe a quién enviar NACK)
+            # Falta user_id: la referencia v3 pide NACK. Se responde a la ciudad que el mensaje
+            # dice ser; si cityId ni siquiera es un código de ciudad, no hay a quién y se descarta.
+            if isinstance(sender_city, str) and _CODIGO_CIUDAD.match(sender_city):
+                return nack(
+                    "IDENTITY_MISMATCH",
+                    403,
+                    f"falta user_id AMQP en {msg_type} de ciudad {sender_city}",
+                    target_routing_key=f"city.{sender_city}",
+                )
             return (
                 None,
                 None,

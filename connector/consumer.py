@@ -46,6 +46,7 @@ from events import (
     construir_mensaje_ack,
     construir_mensaje_nack,
     parse_demand_event,
+    ruta_respuesta,
     validacion_mensaje_entrante,
 )
 from heartbeat import record_heartbeat
@@ -300,12 +301,14 @@ def process_city_message(
             cycle_id if isinstance(cycle_id, str) else None,
             settings.city_code,
         )
+        # El NACK va a quien publicó: una ciudad en su cola, la central en la suya.
         _reject(
             channel,
             nack,
             body,
             master,
             settings,
+            target_routing_key=ruta_respuesta(user_id),
             sender_city=sender_city,
             sender_user_id=sender_user_id,
         )
