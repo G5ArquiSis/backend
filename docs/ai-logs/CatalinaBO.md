@@ -36,3 +36,32 @@ Ejecución local de tests unitarios (`pytest connector/tests/`), validación con
 
 * **Referencia:** PR #7
 
+
+## 2026-11-03 — Revisión y pruebas del rol B (Wallet)
+
+* **Herramienta**: Asistente de IA (ChatGPT), modo codex y chat.
+
+* **Tarea**: Revisar los avances que ya se tenía implementados para el Rol B de la Entrega 2, identificar los errores puntuales que estos tenían  y ejecutar pruebas para verificar el funcionamiento de las nuevas funcionalidades del protocolo v3.
+
+* **Prompts Relevantes:**:
+
+  * "Revisa los avances que ya tengo implementados para el Rol B e identifica posibles errores o incompatibilidades con el protocolo v3"
+  * "Implementa los tests correspondientes a las nuevas funcionalidades y ejecútalos para comprobar su funcionamiento"
+  * "Explicame los errores circulares que estoy teniendo"
+
+* **Qué produjo la IA:**:
+
+  * Revisión y ajustes faltantes en la integración con la Wallet.
+  * Correcciones relacionadas con la consistencia de los datos en el ledger.
+  * Incorpora las pruebas para las nuevas funcionalidades del protocolo v3 .
+
+**Verificación:**
+
+Ejecución local de tests unitarios validación con linter (`ruff check .`) y paso exitoso de la suite en GitHub Actions.
+
+* **Correcciones del integrante**:
+
+  * Se revisó y adaptó manualmente cada sugerencia para conservar la estructura del proyecto y cumplir con los nuevos requisitos de esta entrega.
+  * El diseño de la arquitectura, la lógica de la wallet y los modelos de base de datos fueron definidos e implementados directamente según las especificaciones del enunciado.
+
+  
