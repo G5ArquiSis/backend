@@ -19,7 +19,7 @@ BidAcceptancePolicy = Literal["arrival_order", "largest_quantity_first"]
 OfferSelectionPolicy = Literal["lowest_effective_price", "lowest_nominal_price"]
 
 # Serializa la creación inicial de la fila singleton en las dos réplicas de master.
-_STRATEGY_LOCK_KEY = 2173_0006
+_STRATEGY_LOCK_KEY = 2173_0009  # 0006 ya lo usa la conciliación de la wallet
 _STRATEGY_STATE_ID = 1
 
 
