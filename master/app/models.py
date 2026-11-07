@@ -182,6 +182,10 @@ class MessageLog(Base):
     message_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cycle_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Quién lo mandó (RF05): `city_id` es el cityId que trae el mensaje, o "central"; `user_id` es
+    # el user_id AMQP real, que solo conoce connector. Si no coinciden, es IDENTITY_MISMATCH.
+    city_id: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Texto y no JSONB: un mensaje descartado puede no ser JSON válido.
     raw_content: Mapped[str] = mapped_column(Text)
     received_at: Mapped[datetime] = mapped_column(

@@ -105,7 +105,7 @@ async def log_unapplied_message(
     Los duplicados no se informan por acá: los registra master al detectarlos.
     """
     stored = await record_unapplied_message(
-        session, entry.category, entry.raw_content, entry.reason
+        session, entry.category, entry.raw_content, entry.reason, entry.user_id
     )
 
     return MessageLogEntry.model_validate(stored)

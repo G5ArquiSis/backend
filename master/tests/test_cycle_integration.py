@@ -9,6 +9,7 @@ Sin base alcanzable la fixture `database` los salta.
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -780,6 +781,50 @@ async def test_message_log_is_paginated(client: httpx.AsyncClient, db: AsyncSess
 
     assert (len(first["items"]), first["total"], first["pages"]) == (25, 30, 2)
     assert len(last["items"]) == 5
+
+
+async def test_message_log_records_sender_and_filters_by_city_and_date(
+    client: httpx.AsyncClient, db: AsyncSession
+) -> None:
+    """RF05 (A7): ciudad emisora y user_id de cada registro, filtros y contadores por categoría."""
+    ajeno = {
+        "idpk": "bid-met-1",
+        "msgId": "msg-met-1",
+        "type": "bid",
+        "cityId": "MET",
+        "timestamp": "2026-11-07T12:00:00Z",
+        "data": {"offerId": "TAL-1", "quantity": 10},
+    }
+    de_la_central = {"msgId": "msg-central-1", "type": "transfer", "sender": "central"}
+    for body in (
+        {
+            "category": "nack",
+            "rawContent": json.dumps(ajeno),
+            "reason": "IDENTITY_MISMATCH",
+            "userId": "city.HGW",
+        },
+        {"category": "nack", "rawContent": json.dumps(de_la_central), "userId": "central"},
+        {"category": "discarded", "rawContent": "no es json"},
+    ):
+        assert (await client.post("/internal/message-log", json=body)).status_code == 201
+
+    everything = (await client.get("/message-log")).json()
+    assert everything["counts"] == {"duplicate": 0, "discarded": 1, "nack": 2}
+
+    from_met = (await client.get("/message-log", params={"cityId": "MET"})).json()
+    assert from_met["total"] == 1
+    assert from_met["items"][0]["cityId"] == "MET"
+    assert from_met["items"][0]["userId"] == "city.HGW"
+    assert from_met["counts"] == {"duplicate": 0, "discarded": 0, "nack": 1}
+
+    central = (await client.get("/message-log", params={"cityId": "central"})).json()
+    assert [item["msgId"] for item in central["items"]] == ["msg-central-1"]
+
+    future = (await client.get("/message-log", params={"since": "2999-01-01T00:00:00Z"})).json()
+    assert future["total"] == 0
+    assert future["counts"] == {"duplicate": 0, "discarded": 0, "nack": 0}
+    past = (await client.get("/message-log", params={"until": "2000-01-01T00:00:00Z"})).json()
+    assert past["total"] == 0
 
 
 async def test_connectivity_shows_the_latest_distance_table(

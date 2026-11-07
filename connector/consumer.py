@@ -237,12 +237,14 @@ def process_city_message(
 
     if discard_reason is not None:
         logger.warning("Mensaje descartado: %s", discard_reason)
-        master.guardar_log_master("discarded", _as_text(body), discard_reason)
+        master.guardar_log_master("discarded", _as_text(body), discard_reason, user_id)
         return
 
     if nack is not None:
         target_rk = nack.pop("_target_routing_key", None)
-        _reject(channel, nack, body, master, settings, target_routing_key=target_rk)
+        _reject(
+            channel, nack, body, master, settings, target_routing_key=target_rk, user_id=user_id
+        )
         return
 
     try:
@@ -251,7 +253,7 @@ def process_city_message(
         if message["type"] in TYPES_WITHOUT_ACK:
             logger.warning("%s inválido, se descarta sin responder: %s", message["type"], error)
             reason = f"Contenido inválido para {message['type']}: {error}"[:300]
-            master.guardar_log_master("discarded", _as_text(body), reason)
+            master.guardar_log_master("discarded", _as_text(body), reason, user_id)
             return
         cycle_id = message.get("cycleId")
         nack = construir_mensaje_nack(
@@ -263,7 +265,15 @@ def process_city_message(
             settings.city_code,
         )
         # El NACK va a quien publicó: una ciudad en su cola, la central en la suya.
-        _reject(channel, nack, body, master, settings, target_routing_key=ruta_respuesta(user_id))
+        _reject(
+            channel,
+            nack,
+            body,
+            master,
+            settings,
+            target_routing_key=ruta_respuesta(user_id),
+            user_id=user_id,
+        )
         return
 
     logger.info("type=%s msgId=%s -> %s", message["type"], message["msgId"], outcome)
@@ -466,6 +476,7 @@ def _reject(
     master: MasterClient,
     settings: Settings,
     target_routing_key: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     logger.warning("Se responde NACK por %s", nack["reason"])
     if target_routing_key:
@@ -478,7 +489,7 @@ def _reject(
         )
     else:
         publish_to_central(channel, nack, settings)
-    master.guardar_log_master("nack", _as_text(body), nack["reason"])
+    master.guardar_log_master("nack", _as_text(body), nack["reason"], user_id)
 
 
 # --- Cola del observer (E0) ------------------------------------------------------------

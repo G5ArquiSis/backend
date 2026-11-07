@@ -18,6 +18,7 @@ Tres ideas sostienen el módulo (ADRs de AD2 y AD3):
 import json
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -816,15 +817,22 @@ async def current_distance_table(session: AsyncSession) -> DistanceTable | None:
 
 
 async def record_unapplied_message(
-    session: AsyncSession, category: str, raw_content: str, reason: str | None
+    session: AsyncSession,
+    category: str,
+    raw_content: str,
+    reason: str | None,
+    user_id: str | None = None,
 ) -> MessageLog:
     """Deja constancia de un mensaje duplicado, descartado o respondido con NACK.
 
     Los campos del envelope se extraen si el contenido se puede parsear; un
     mensaje descartado puede no ser JSON, y entonces se guarda solo el texto.
+    `user_id` es el AMQP que informa connector (master no lo ve en los duplicados).
     """
     envelope = _parse_envelope(raw_content)
     entry = MessageLog(
+        city_id=_sender_of(envelope, user_id),
+        user_id=user_id[:64] if user_id else None,
         category=category,
         idpk=_text_or_none(envelope.get("idpk")),
         msg_id=_text_or_none(envelope.get("msgId")),
@@ -838,24 +846,68 @@ async def record_unapplied_message(
     return entry
 
 
+# Categorías de message_log, en el orden en que se muestran.
+MESSAGE_LOG_CATEGORIES = ("duplicate", "discarded", "nack")
+
+
+def _sender_of(envelope: dict, user_id: str | None) -> str | None:
+    """Ciudad emisora según el mensaje: su cityId, o "central" si lo manda la central."""
+    city = _text_or_none(envelope.get("cityId"))
+    if city:
+        return city[:16]
+    if envelope.get("sender") == "central" or user_id == "central":
+        return "central"
+    return None
+
+
+@dataclass(frozen=True)
+class MessageLogFilter:
+    """Filtros de GET /message-log; None es "sin filtro"."""
+
+    category: str | None = None
+    city_id: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+
+
+def _filtered(statement, filters: MessageLogFilter, *, with_category: bool = True):
+    if with_category and filters.category is not None:
+        statement = statement.where(MessageLog.category == filters.category)
+    if filters.city_id is not None:
+        statement = statement.where(MessageLog.city_id == filters.city_id)
+    if filters.since is not None:
+        statement = statement.where(MessageLog.received_at >= filters.since)
+    if filters.until is not None:
+        statement = statement.where(MessageLog.received_at <= filters.until)
+    return statement
+
+
 async def list_message_log(
-    session: AsyncSession, category: str | None, limit: int, offset: int
+    session: AsyncSession, filters: MessageLogFilter, limit: int, offset: int
 ) -> Sequence[MessageLog]:
     """Registro de mensajes no aplicados, del más reciente al más antiguo, siempre acotado."""
-    statement = select(MessageLog)
-    if category is not None:
-        statement = statement.where(MessageLog.category == category)
+    statement = _filtered(select(MessageLog), filters)
     statement = statement.order_by(MessageLog.id.desc()).limit(limit).offset(offset)
 
     return (await session.execute(statement)).scalars().all()
 
 
-async def count_message_log(session: AsyncSession, category: str | None) -> int:
-    statement = select(func.count(MessageLog.id))
-    if category is not None:
-        statement = statement.where(MessageLog.category == category)
-
+async def count_message_log(session: AsyncSession, filters: MessageLogFilter) -> int:
+    statement = _filtered(select(func.count(MessageLog.id)), filters)
     return (await session.execute(statement)).scalar_one()
+
+
+async def count_message_log_by_category(
+    session: AsyncSession, filters: MessageLogFilter
+) -> dict[str, int]:
+    """Cuántos hay de cada categoría con los demás filtros (para los contadores de la página)."""
+    statement = _filtered(
+        select(MessageLog.category, func.count(MessageLog.id)), filters, with_category=False
+    ).group_by(MessageLog.category)
+    counts = dict.fromkeys(MESSAGE_LOG_CATEGORIES, 0)
+    for category, total in (await session.execute(statement)).all():
+        counts[category] = total
+    return counts
 
 
 async def total_budget(session: AsyncSession) -> Decimal:

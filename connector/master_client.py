@@ -54,17 +54,24 @@ class MasterClient:
         response = self._post(f"{self._base_url}/internal/messages", mensaje, rejects=True)
         return response.json().get("outcome", "applied")
 
-    def guardar_log_master(self, categoria: str, mensaje_evento: str, reason: str | None) -> bool:
+    def guardar_log_master(
+        self,
+        categoria: str,
+        mensaje_evento: str,
+        reason: str | None,
+        user_id: str | None = None,
+    ) -> bool:
         """Deja constancia de un mensaje descartado o respondido con NACK (RF05).
 
-        No levanta: perder una línea del registro no justifica reencolar ni botar
-        el consumo. Devuelve si quedó guardado.
+        `user_id` es el AMQP con que llegó el mensaje: solo connector lo ve, y con él la
+        interfaz muestra un IDENTITY_MISMATCH. No levanta: perder una línea del registro no
+        justifica reencolar ni botar el consumo. Devuelve si quedó guardado.
         """
+        cuerpo = {"category": categoria, "rawContent": mensaje_evento, "reason": reason}
+        if user_id:
+            cuerpo["userId"] = user_id
         try:
-            self._post(
-                f"{self._base_url}/internal/message-log",
-                {"category": categoria, "rawContent": mensaje_evento, "reason": reason},
-            )
+            self._post(f"{self._base_url}/internal/message-log", cuerpo)
         except MasterUnavailableError as error:
             logger.error("No se pudo registrar el mensaje %s: %s", categoria, error)
             return False

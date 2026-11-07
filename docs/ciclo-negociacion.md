@@ -117,12 +117,19 @@ hace daño: lleva el mismo `idpk`.
 POST /internal/message-log
 Content-Type: application/json
 
-{ "category": "discarded" | "nack", "rawContent": "<cuerpo tal como llegó>", "reason": "MALFORMED_MESSAGE" }
+{ "category": "discarded" | "nack", "rawContent": "<cuerpo tal como llegó>", "reason": "MALFORMED_MESSAGE",
+  "userId": "city.HGW" }
 ```
 
 `connector` lo llama cuando descarta un mensaje (no se pudo parsear o no trae `msgId`) y cuando
-responde NACK. `rawContent` es texto, porque un mensaje descartado puede no ser JSON. Los
-duplicados no se informan por acá: los registra `master` al detectarlos.
+responde NACK. `rawContent` es texto, porque un mensaje descartado puede no ser JSON. `userId` es
+el `user_id` AMQP con que llegó (opcional): solo `connector` lo ve, y junto al `cityId` del mensaje
+muestra un `IDENTITY_MISMATCH` de otra ciudad (RF05). Los duplicados no se informan por acá: los
+registra `master` al detectarlos.
+
+El NACK se publica a quien mandó el mensaje según su `user_id` (RabbitMQ no deja publicar con
+otro): `city.X` a la cola de esa ciudad, y la central a la suya. Un bid sin `user_id` recibe
+`IDENTITY_MISMATCH` en la cola de la ciudad que dice ser.
 
 ## Qué hace `master` con cada mensaje
 
@@ -190,7 +197,7 @@ Entran por `https://api.melchort.me`, con el token de Auth0. Por `https://melcho
 | `GET /cycles` | Ciclos del más reciente al más antiguo, con su balance y el presupuesto actual (RF01) |
 | `GET /cycles/{cycleId}` | Historial de un ciclo: `statusStatement`, `transfers`, `demandStatements`, `negotiations`, `report` y `balances`. `operations` trae todo en orden, y la última lleva `isLast: true` (RF01) |
 | `GET /connectivity` | La `distance-table` vigente: destino, distancia, `transportCost` y `enabled` (RF02) |
-| `GET /message-log` | Duplicados, descartados y NACK, paginados; filtra con `?category=duplicate\|discarded\|nack` (RF05) |
+| `GET /message-log` | Duplicados, descartados y NACK, paginados, con la ciudad emisora (`cityId`, o `central`) y el `userId` AMQP. Filtra con `?category=duplicate\|discarded\|nack`, `cityId`, `since` y `until`; `counts` trae cuántos hay de cada categoría con los demás filtros (RF05) |
 | `GET /wallet/balance-status` | Saldos oficiales de la wallet, su diferencia con el ledger y el estado de la última reconciliación (AD5) |
 | `POST /negotiations` | Retirado en el protocolo v3: siempre responde 410 |
 | `GET /negotiations`, `GET /negotiations/{id}` | Historial de las negociaciones de la E1, de solo lectura |

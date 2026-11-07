@@ -150,6 +150,8 @@ class UnappliedMessageIn(CamelCaseModel):
     category: Literal["discarded", "nack"]
     raw_content: str
     reason: str | None = None
+    # user_id AMQP con que llegó el mensaje; con él se ve un IDENTITY_MISMATCH (RF05).
+    user_id: str | None = Field(default=None, max_length=64)
 
 
 class MessageLogEntry(CamelCaseModel):
@@ -162,6 +164,10 @@ class MessageLogEntry(CamelCaseModel):
     message_type: str | None
     cycle_id: str | None
     reason: str | None
+    city_id: str | None = Field(
+        default=None, description='Ciudad emisora según el mensaje (cityId), o "central"'
+    )
+    user_id: str | None = Field(default=None, description="user_id AMQP con que llegó")
     raw_content: str
     received_at: datetime
 
@@ -172,3 +178,7 @@ class MessageLogPage(CamelCaseModel):
     limit: int
     total: int
     pages: int
+    counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Registros por categoría con los demás filtros (sin el de categoría)",
+    )

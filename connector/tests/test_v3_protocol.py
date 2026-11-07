@@ -407,3 +407,30 @@ def test_market_thread_only_with_market_enabled(monkeypatch) -> None:
         assert started == expected
         for name in started:
             assert name in CONSUMERS
+
+
+def test_message_log_receives_the_amqp_user_id(master_with) -> None:
+    """RF05: el registro de un NACK lleva el user_id AMQP real, para ver un IDENTITY_MISMATCH."""
+    recorder = RecordingMaster()
+    channel = FakeChannel()
+    bid = {
+        "idpk": "bid-idpk-12",
+        "msgId": "msg-bid-12",
+        "type": "bid",
+        "timestamp": "2026-11-06T12:00:00Z",
+        "cityId": "MET",
+        "data": {"offerId": "TAL-1", "quantity": 10},
+    }
+
+    consumer.process_city_message(
+        channel,
+        as_body(bid),
+        master_with(recorder),
+        SETTINGS,
+        properties=DummyProperties("city.HGW"),
+    )
+
+    [registro] = recorder.bodies("/internal/message-log")
+    assert registro["category"] == "nack"
+    assert registro["reason"] == "IDENTITY_MISMATCH"
+    assert registro["userId"] == "city.HGW"

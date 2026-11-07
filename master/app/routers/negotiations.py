@@ -4,6 +4,7 @@
 Solo traduce entre HTTP y la capa de datos; ninguna query vive acá.
 """
 
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -12,8 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.cycle_repository import (
+    MessageLogFilter,
     budget_at_close,
     count_message_log,
+    count_message_log_by_category,
     current_distance_table,
     get_cycle,
     get_cycle_report,
@@ -219,12 +222,31 @@ async def list_unapplied_messages(
         Literal["duplicate", "discarded", "nack"] | None,
         Query(description="Filtra por tipo de registro"),
     ] = None,
+    city_id: Annotated[
+        str | None,
+        Query(
+            alias="cityId",
+            max_length=16,
+            description='Ciudad emisora según el mensaje (cityId), o "central"',
+        ),
+    ] = None,
+    since: Annotated[
+        datetime | None, Query(description="Recibidos desde este instante (incluido)")
+    ] = None,
+    until: Annotated[
+        datetime | None, Query(description="Recibidos hasta este instante (incluido)")
+    ] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
 ) -> MessageLogPage:
-    """Mensajes duplicados, descartados y respondidos con NACK (RF05), paginados."""
-    total = await count_message_log(session, category)
-    entries = await list_message_log(session, category, limit, (page - 1) * limit)
+    """Mensajes duplicados, descartados y respondidos con NACK (RF05), paginados.
+
+    Incluye los de otras ciudades (por ejemplo un bid con IDENTITY_MISMATCH): `cityId` es la
+    ciudad que el mensaje dice ser y `userId` el user_id AMQP con que llegó.
+    """
+    filters = MessageLogFilter(category=category, city_id=city_id, since=since, until=until)
+    total = await count_message_log(session, filters)
+    entries = await list_message_log(session, filters, limit, (page - 1) * limit)
 
     return MessageLogPage(
         items=[MessageLogEntry.model_validate(entry) for entry in entries],
@@ -232,6 +254,7 @@ async def list_unapplied_messages(
         limit=limit,
         total=total,
         pages=(total + limit - 1) // limit,
+        counts=await count_message_log_by_category(session, filters),
     )
 
 
