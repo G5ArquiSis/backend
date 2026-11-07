@@ -221,6 +221,22 @@ def handle_city_delivery(
     channel.basic_ack(delivery_tag=delivery_tag)
 
 
+def _extract_sender_info(body: bytes, user_id: str | None = None) -> tuple[str | None, str | None]:
+    """Extrae mejor esfuerzo de ciudad y user_id remitente para el message_log (RF05)."""
+    city = None
+    try:
+        raw = json.loads(body)
+        if isinstance(raw, dict):
+            city = raw.get("cityId") or raw.get("city") or raw.get("sender")
+            if not city and isinstance(raw.get("data"), dict):
+                city = raw["data"].get("cityId")
+    except Exception:
+        pass
+    if not city and user_id and user_id.startswith("city."):
+        city = user_id.split(".", 1)[-1].upper()
+    return city, user_id
+
+
 def process_city_message(
     channel: BlockingChannel,
     body: bytes,
@@ -230,18 +246,35 @@ def process_city_message(
 ) -> None:
     """Valida un mensaje entrante (identidad y envelope), lo entrega a master y responde."""
     user_id = properties.user_id if properties else None
+    sender_city, sender_user_id = _extract_sender_info(body, user_id=user_id)
+
     message, nack, discard_reason = validacion_mensaje_entrante(
         body, settings.city_code, user_id=user_id
     )
 
     if discard_reason is not None:
         logger.warning("Mensaje descartado: %s", discard_reason)
-        master.guardar_log_master("discarded", _as_text(body), discard_reason)
+        master.guardar_log_master(
+            "discarded",
+            _as_text(body),
+            discard_reason,
+            sender_city=sender_city,
+            sender_user_id=sender_user_id,
+        )
         return
 
     if nack is not None:
         target_rk = nack.pop("_target_routing_key", None)
-        _reject(channel, nack, body, master, settings, target_routing_key=target_rk)
+        _reject(
+            channel,
+            nack,
+            body,
+            master,
+            settings,
+            target_routing_key=target_rk,
+            sender_city=sender_city,
+            sender_user_id=sender_user_id,
+        )
         return
 
     try:
@@ -250,7 +283,13 @@ def process_city_message(
         if message["type"] in TYPES_WITHOUT_ACK:
             logger.warning("%s inválido, se descarta sin responder: %s", message["type"], error)
             reason = f"Contenido inválido para {message['type']}: {error}"[:300]
-            master.guardar_log_master("discarded", _as_text(body), reason)
+            master.guardar_log_master(
+                "discarded",
+                _as_text(body),
+                reason,
+                sender_city=sender_city,
+                sender_user_id=sender_user_id,
+            )
             return
         cycle_id = message.get("cycleId")
         nack = construir_mensaje_nack(
@@ -261,7 +300,15 @@ def process_city_message(
             cycle_id if isinstance(cycle_id, str) else None,
             settings.city_code,
         )
-        _reject(channel, nack, body, master, settings)
+        _reject(
+            channel,
+            nack,
+            body,
+            master,
+            settings,
+            sender_city=sender_city,
+            sender_user_id=sender_user_id,
+        )
         return
 
     logger.info("type=%s msgId=%s -> %s", message["type"], message["msgId"], outcome)
@@ -464,6 +511,8 @@ def _reject(
     master: MasterClient,
     settings: Settings,
     target_routing_key: str | None = None,
+    sender_city: str | None = None,
+    sender_user_id: str | None = None,
 ) -> None:
     logger.warning("Se responde NACK por %s", nack["reason"])
     if target_routing_key:
@@ -476,7 +525,13 @@ def _reject(
         )
     else:
         publish_to_central(channel, nack, settings)
-    master.guardar_log_master("nack", _as_text(body), nack["reason"])
+    master.guardar_log_master(
+        "nack",
+        _as_text(body),
+        nack["reason"],
+        sender_city=sender_city,
+        sender_user_id=sender_user_id,
+    )
 
 
 # --- Cola del observer (E0) ------------------------------------------------------------

@@ -150,6 +150,8 @@ class UnappliedMessageIn(CamelCaseModel):
     category: Literal["discarded", "nack"]
     raw_content: str
     reason: str | None = None
+    sender_city: str | None = None
+    sender_user_id: str | None = None
 
 
 class MessageLogEntry(CamelCaseModel):
@@ -162,8 +164,17 @@ class MessageLogEntry(CamelCaseModel):
     message_type: str | None
     cycle_id: str | None
     reason: str | None
+    sender_city: str | None = None
+    sender_user_id: str | None = None
     raw_content: str
     received_at: datetime
+
+
+class MessageLogCounts(CamelCaseModel):
+    total: int = 0
+    duplicate: int = 0
+    discarded: int = 0
+    nack: int = 0
 
 
 class MessageLogPage(CamelCaseModel):
@@ -172,3 +183,4 @@ class MessageLogPage(CamelCaseModel):
     limit: int
     total: int
     pages: int
+    counts: MessageLogCounts | None = None
