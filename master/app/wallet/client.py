@@ -163,8 +163,8 @@ class WalletClient:
         # give es un dict con asset (el activo es la energía) y amount (cantidad de kwh que ofrece)
         # take es un dict con asset (el activo es el credito) y amount (lo que cuesta en total
         # aceptar el swap).
-        # Ejemplo: give = {"asset": "kwh", "amount": 10}, take = {"asset": "credits", "amount": 100}
-        # lo que se retiene es el Give (kwh) de la cuenta del proponente
+        # Ejemplo: give = {"asset": "KWH", "amount": 10}, take = {"asset": "CR", "amount": 100}
+        # lo que se retiene es el Give (KWH) de la cuenta del proponente
 
         json_propose = {"give": give, "take": take, "expiresAt": expires_at, "memo": memo}
 

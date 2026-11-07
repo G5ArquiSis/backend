@@ -181,11 +181,11 @@ async def process_reserved_bids(settings: Settings) -> None:
             try:
                 response = await wallet.propose_swap(
                     give={
-                        "asset": "kwh",
+                        "asset": "KWH",
                         "amount": job["quantity"],
                     },
                     take={
-                        "asset": "credits",
+                        "asset": "CR",
                         "amount": _json_number(job["amount"]),
                     },
                     expires_at=job["expires_at"],

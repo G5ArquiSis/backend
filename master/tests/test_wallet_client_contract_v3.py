@@ -47,8 +47,8 @@ async def test_propose_swap_sends_correct_payload_and_idempotency_key():
         transport=httpx.MockTransport(handler),
     ) as client:
         result = await client.propose_swap(
-            give={"asset": "kwh", "amount": 10},
-            take={"asset": "credits", "amount": 100},
+            give={"asset": "KWH", "amount": 10},
+            take={"asset": "CR", "amount": 100},
             expires_at="2026-11-06T23:00:00Z",
             memo="offer-1",
             idempotency_key="bid-1",
@@ -67,8 +67,8 @@ async def test_propose_swap_sends_correct_payload_and_idempotency_key():
     import json
 
     assert json.loads(request.content) == {
-        "give": {"asset": "kwh", "amount": 10},
-        "take": {"asset": "credits", "amount": 100},
+        "give": {"asset": "KWH", "amount": 10},
+        "take": {"asset": "CR", "amount": 100},
         "expiresAt": "2026-11-06T23:00:00Z",
         "memo": "offer-1",
     }
