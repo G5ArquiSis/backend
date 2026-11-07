@@ -122,6 +122,13 @@ async def _apply_bid_accepted(
         bid.reason = "QUANTITY_MISMATCH"
     bid.accept_key = str(uuid.uuid4())
     bid.deadline_at = None
+    if bid.state == BID_PROPOSED:
+        # El vendedor ya reservó esa cantidad: se descuenta del remaining local para no volver
+        # a pujarle por kWh que ya no tiene mientras llega su offer-updated (que rige si es
+        # más nuevo).
+        offer = await session.get(MarketOffer, bid.offer_id, with_for_update=True)
+        if offer is not None:
+            offer.remaining = max(Decimal(0), offer.remaining - bid.quantity)
 
     from app.wallet.correlation import register_swap_cycle
 
@@ -187,21 +194,42 @@ async def _after_swap_settled(
     return APPLIED if settled.rowcount else IGNORED
 
 
+async def _fail_swap(session: AsyncSession, bid: MarketBid, state: str, reason: str) -> None:
+    """Da por perdido el swap de un bid y le devuelve la cantidad a la oferta del libro.
+
+    Al llegar `bid-accepted` se descontó del `remaining` local lo que el vendedor reservó; si
+    el swap no se liquida, el vendedor recupera esos kWh y se pueden volver a pedir.
+    """
+    bid.state, bid.reason = state, reason[:64]
+    offer = await session.get(MarketOffer, bid.offer_id, with_for_update=True)
+    if offer is not None:
+        offer.remaining += bid.quantity
+        if offer.quantity is not None:
+            offer.remaining = min(offer.remaining, offer.quantity)
+
+
+async def _fail_live_swap(session: AsyncSession, swap_id: str, reason: str) -> str:
+    found = await session.execute(
+        select(MarketBid)
+        .where(MarketBid.swap_id == swap_id, MarketBid.state.in_((BID_PROPOSED, BID_ACCEPTED)))
+        .with_for_update()
+    )
+    bid = found.scalar_one_or_none()
+    if bid is None:
+        return IGNORED
+    await _fail_swap(session, bid, BID_FAILED, reason)
+    return APPLIED
+
+
 async def _after_swap_rejected(
     session: AsyncSession, message: dict, now: datetime, settings: Settings, outcome: str | None
 ) -> str:
     data = message.get("data") or {}
     if data.get("operation") != "accept" or not data.get("swapId"):
         return IGNORED
-    failed = await session.execute(
-        update(MarketBid)
-        .where(
-            MarketBid.swap_id == data["swapId"],
-            MarketBid.state.in_((BID_PROPOSED, BID_ACCEPTED)),
-        )
-        .values(state=BID_FAILED, reason=str(message.get("reason") or "SWAP_REJECTED")[:64])
+    return await _fail_live_swap(
+        session, data["swapId"], str(message.get("reason") or "SWAP_REJECTED")
     )
-    return APPLIED if failed.rowcount else IGNORED
 
 
 async def _after_swap_expired(
@@ -211,12 +239,7 @@ async def _after_swap_expired(
     swap_id = (message.get("data") or {}).get("swapId")
     if not swap_id:
         return IGNORED
-    expired = await session.execute(
-        update(MarketBid)
-        .where(MarketBid.swap_id == swap_id, MarketBid.state.in_((BID_PROPOSED, BID_ACCEPTED)))
-        .values(state=BID_FAILED, reason="SWAP_EXPIRED")
-    )
-    return APPLIED if expired.rowcount else IGNORED
+    return await _fail_live_swap(session, swap_id, "SWAP_EXPIRED")
 
 
 async def close_cycle_bids(session: AsyncSession, cycle_id: str) -> int:
@@ -300,15 +323,15 @@ async def accept_proposed_swaps(
     )
     for bid in proposed.scalars().all():
         if bid.swap_expires_at is not None and bid.swap_expires_at <= now:
-            bid.state, bid.reason = BID_FAILED, "SWAP_EXPIRED"
+            await _fail_swap(session, bid, BID_FAILED, "SWAP_EXPIRED")
             continue
         if bid.swap_price > bid.price_per_energy:
             # Pedimos al precio de la oferta: si el vendedor cobra más, no se acepta.
-            bid.state, bid.reason = BID_TOKEN_INVALID, "PRICE_ABOVE_OFFER"
+            await _fail_swap(session, bid, BID_TOKEN_INVALID, "PRICE_ABOVE_OFFER")
             continue
         amount = round2(bid.quantity * bid.swap_price)
         if bid.swap_amount != amount:
-            bid.state, bid.reason = BID_TOKEN_INVALID, "AMOUNT_MISMATCH"
+            await _fail_swap(session, bid, BID_TOKEN_INVALID, "AMOUNT_MISMATCH")
             continue
         expected = Expected(bid.swap_id, bid.seller, bid.quantity, amount, bid.offer_id)
         try:
@@ -318,7 +341,7 @@ async def accept_proposed_swaps(
             return
         if problems:
             logger.warning("Token del swap %s rechazado: %s", bid.swap_id, "; ".join(problems))
-            bid.state, bid.reason = BID_TOKEN_INVALID, problems[0][:64]
+            await _fail_swap(session, bid, BID_TOKEN_INVALID, problems[0])
             continue
         try:
             await wallet.accept_swap(bid.swap_id, bid.accept_key)
@@ -326,8 +349,8 @@ async def accept_proposed_swaps(
             if error.status_code >= 500 or error.status_code == 429:
                 continue  # misma llave en el próximo tick
             payload = error.payload if isinstance(error.payload, dict) else {}
-            bid.state = BID_FAILED
-            bid.reason = str(payload.get("reason") or f"HTTP_{error.status_code}")[:64]
+            reason = str(payload.get("reason") or f"HTTP_{error.status_code}")
+            await _fail_swap(session, bid, BID_FAILED, reason)
             continue
         except httpx.HTTPError:
             continue  # pudo haberse aceptado: se reintenta con la misma llave

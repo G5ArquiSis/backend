@@ -492,6 +492,9 @@ async def placed_and_accepted(db: AsyncSession, **token_override) -> MarketBid:
 
 async def test_valid_token_is_accepted_and_settles(db: AsyncSession) -> None:
     bid = await placed_and_accepted(db)
+    # El vendedor reservó lo pedido: el libro no ofrece de nuevo esos kWh.
+    offer = await db.get(MarketOffer, "HGW-1", populate_existing=True)
+    assert offer.remaining == 9000 - bid.quantity
     wallet = FakeWallet()
 
     await buyer.accept_proposed_swaps(db, NOW + timedelta(seconds=2), wallet.client(), jwks())
@@ -647,3 +650,18 @@ async def test_span_experiment_per_cycle_and_by_span(
     [summary] = body["bySpan"]
     assert summary["spanSeconds"] == 30 and summary["cycles"] == 1
     assert summary["costVsBaseline"] == "0.6259"
+
+
+async def test_invalid_token_gives_the_quantity_back_to_the_offer(db: AsyncSession) -> None:
+    await placed_and_accepted(db, memo="otra-oferta")
+    await buyer.accept_proposed_swaps(db, NOW + timedelta(seconds=2), FakeWallet().client(), jwks())
+    await db.commit()
+
+    offer = await db.get(MarketOffer, "HGW-1", populate_existing=True)
+    assert offer.remaining == 9000
+    # Y un swap-expired posterior del mismo swap no la devuelve dos veces.
+    expired = message("swap-expired", "expired-1", {"swapId": "swp-77"}, city=None)
+    del expired["cycleId"]
+    await apply(db, expired)
+    offer = await db.get(MarketOffer, "HGW-1", populate_existing=True)
+    assert offer.remaining == 9000
