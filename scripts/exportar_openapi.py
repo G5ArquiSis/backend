@@ -40,6 +40,9 @@ SUMMARIES = {
     ("/connectivity", "get"): "Distance-table vigente (RF02)",
     ("/message-log", "get"): "Mensajes duplicados, descartados o con NACK (RF05)",
     ("/wallet/balance-status", "get"): "Balance oficial de la wallet y su conciliación (AD5)",
+    ("/market/book", "get"): "Libro de ofertas con transporte y precio efectivo (RF02)",
+    ("/market/bids", "get"): "Bids de TAL y el estado de su swap (motor comprador)",
+    ("/experiments/span", "get"): "Experimento de span por ciclo y por valor de span (RF06)",
 }
 PUBLIC_WITHOUT_TOKEN = {"/health"}
 
@@ -51,6 +54,8 @@ Gateway (`https://api.melchort.me`), que exige un JWT de Auth0 y agrega los head
 - RF02: `/connectivity`
 - RF04: `/negotiations`
 - RF05: `/message-log`
+- RF02 (E2): `/market/book`; motor comprador: `/market/bids`
+- RF06: `/experiments/span`
 - E0: `/history`
 
 Los endpoints `/internal/*` (contrato entre connector y master) quedan fuera de este archivo:

@@ -11,6 +11,7 @@ Stack local con el broker y la wallet falsos (`scripts/fake_wallet/README.md`):
 
 ```bash
 cat scripts/fake_wallet/env.fake >> .env      # una vez
+# Para los ensayos del mercado: MARKET_ENABLED=true y BUYER_ENABLED=true en el .env
 docker compose --profile fake up --build -d
 source .venv/bin/activate                     # los scripts usan pika (connector/requirements.txt)
 python3 scripts/demo_anomalia_5.py
@@ -48,20 +49,26 @@ credenciales son las de `scripts/fake_wallet/rabbitmq/definitions.json` y sólo 
 Todos aceptan `--help`. Las esperas largas (`--espera`, `--espera-oferta`) existen porque TAL
 ofrece o puja según su estrategia y el momento del ciclo.
 
-## Estado al 2026-11-06 (main + PR #29)
+## Estado al 2026-11-06 (main + PR #28 + rama del rol D)
+
+Con `MARKET_ENABLED=true` y `BUYER_ENABLED=true` en el `.env` local. `escenario_e2e.py
+--tal-compra` y las anomalías 4 y 6 arman su propio ciclo con déficit para TAL
+(`local.mercado_comprador`): ciclo nuevo, TAL sin kWh (como tras el `imbalance-settlement` del
+ciclo anterior) y ruta habilitada a HGW. Si la wallet falsa quedó sin crédito para TAL después
+de muchos ensayos, `curl -X POST http://127.0.0.1:8090/_fake/reset`.
 
 | # | Resultado | Qué falta |
 |---|---|---|
-| 1 | ✗ connector responde `nack UNKNOWN_TYPE` al `swap-settled` | Tipos v3 en connector (PR #28) |
-| 2 | ✗ nack `UNKNOWN_TYPE` a la central en vez de `IDENTITY_MISMATCH`/`MALFORMED_MESSAGE` a HGW | Tipos v3, identidad y destino del nack (A2, PR #28) |
-| 3, 4, 1 `--tipo bid` | ✗ TAL no publica ofertas ni puja | Estrategia de venta y compra (C y D) |
+| 1 `--tipo swap-settled` | ✓ ACK al duplicado, `duplicate` en `/message-log`, wallet sin cambios; ✗ el ciclo no muestra el evento | El swap del ensayo se hace directo en la wallet, sin bid: nada lo asocia a un ciclo (en el flujo real lo asocia el `bid-accepted` o el `trade-recorded`) |
+| 1 `--tipo bid`, 3 | ✗ TAL no publica ofertas | Lado vendedor (C) |
+| 2 | ✓ `IDENTITY_MISMATCH` a HGW por `cityId` ajeno y JSON inválido descartado; ✗ sin `user_id` se descarta sin nack, `quantity` no entera llega a master y recibe ACK, y sin `idpk` el nack va a la central | Validación de bids entrantes y destino del nack en connector (A2) |
+| 4 `--operacion accept` | ✓ 504 en el accept, reintento con la misma Idempotency-Key, un solo swap liquidado y master converge | — |
+| 4 `--operacion propose` | ✗ TAL no publica ofertas | Lado vendedor (C) |
 | 5 | ✓ en los dos modos | — |
-| 6 | ✓ `/connectivity` refleja el cambio; no hay pujas de TAL que observar | Estrategia de compra (D) para ver la selección |
+| 6 | ✓ `/connectivity` y `/market/book` reflejan la ruta deshabilitada con la tarifa punitiva; TAL sigue comprando porque el precio efectivo (253) es menor que `imbalancePrice` (735) | — |
 | 7 | ✓ las reconciliaciones tardan lo inyectado y master sigue respondiendo | Correrlo con la license key para verlo en New Relic |
-| E2E | ✓ status-statement, distance-table y reporte; ✗ TAL no ofrece ni puja | Estrategia (C y D) y tipos v3 en connector (PR #28) |
+| E2E `--tal-compra` | ✓ bid, `bid-accepted`, token verificado, accept, `swap-settled` a ambos y reporte con el swap | — |
+| E2E (TAL vende) | ✗ TAL no ofrece | Lado vendedor (C) |
 | Caída | ✓ en los dos modos: el reporte sale una vez tras el reinicio, y sin reporte el cierre queda registrado para `CycleClosed` | — |
 
-La contraparte se probó sola (HGW ofrece, recibe un bid, propone, manda `bid-accepted` y el
-swap se liquida en la wallet falsa), y todos los mensajes que arman los scripts cumplen los
-schemas del curso v3.0.2. Al mergear cada PR del mercado, volver a correr la tabla y
-actualizarla.
+Correr la tabla de nuevo al mergear el lado vendedor (C) y A2, y actualizarla.
