@@ -73,7 +73,7 @@ def tal_compra(r: local.Resultado, hgw: Contraparte, precio: Decimal, espera: fl
         "ningún accept repetido fue rechazado (misma Idempotency-Key)",
         ", ".join(e.get("reason", "?") for e in rechazos),
     )
-    convergencia(r, swap["swapId"])
+    convergencia(r, swap["swapId"], hgw.ciclo)
 
 
 def tal_vende(r: local.Resultado, hgw: Contraparte, espera: float) -> None:
@@ -106,12 +106,11 @@ def tal_vende(r: local.Resultado, hgw: Contraparte, espera: float) -> None:
     if respuesta and respuesta["type"] == "bid-accepted":
         status, _ = hgw.aceptar_swap(respuesta["data"]["swapId"])
         r.chequeo(status == 202, "HGW acepta el swap")
-        convergencia(r, respuesta["data"]["swapId"])
+        convergencia(r, respuesta["data"]["swapId"], hgw.ciclo)
 
 
-def convergencia(r: local.Resultado, swap_id: str) -> None:
+def convergencia(r: local.Resultado, swap_id: str, ciclo: str) -> None:
     r.paso("El nodo converge")
-    ciclo = local.ciclo_actual()
 
     def swaps_en_master() -> list:
         # El swap-settled pasa por el broker y connector antes de llegar a master: se espera.
@@ -140,22 +139,25 @@ def main() -> None:
     r = local.Resultado("Anomalía 4")
     local.stack_arriba(r)
     local.wallet_admin("POST", "/market", {"kwhEnabled": True})
-    if args.operacion == "accept":
-        # TAL compra: hace falta un ciclo con déficit y el mercado abierto.
-        central = local.Broker("central")
-        ciclo = local.mercado_comprador(central, "anomalia4", mercado=args.espera + 30)
-        central.cerrar()
-    else:
-        ciclo = local.ciclo_actual()
-    hgw = Contraparte(ciclo)
+    # HGW vacía sus colas antes de abrir el ciclo: después llega ahí la oferta o el bid de TAL.
+    hgw = Contraparte("")
+    central = local.Broker("central")
     try:
         hgw.vaciar()
+        mercado = args.espera + 30
+        if args.operacion == "accept":
+            # TAL compra: ciclo con déficit. Con propose, TAL vende: ciclo con excedente.
+            hgw.ciclo = local.mercado_comprador(central, "anomalia4", mercado=mercado)
+        else:
+            hgw.ciclo = local.mercado_vendedor(central, "anomalia4", mercado=mercado)
+        r.info(f"ciclo: {hgw.ciclo}")
         if args.operacion == "accept":
             tal_compra(r, hgw, args.precio, args.espera)
         else:
             tal_vende(r, hgw, args.espera)
     finally:
         local.wallet_admin("DELETE", "/faults")
+        central.cerrar()
         hgw.cerrar()
     r.terminar()
 
