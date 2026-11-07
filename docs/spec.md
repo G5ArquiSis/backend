@@ -63,8 +63,8 @@ escriben como ADR en [`adr/`](adr/) antes que su código, y AD1 a AD3 reciben su
 |---|---|---|
 | A | Mensajería, protocolo y contratos de mensajes | Vicente Pavez |
 | B | Wallet, ledger y ciclo autónomo | Catalina Berrios |
-| C | Lado vendedor, estrategia y administración | Por confirmar |
-| D | Lado comprador, libro de mercado y experimento de span | Por confirmar |
+| C | Lado vendedor, estrategia y administración | Carlos Riffo |
+| D | Lado comprador, libro de mercado y experimento de span | Melchor Guerrero |
 | E | Infraestructura, monitoreo, calidad y documentación | Melchor Guerrero |
 
 Cada rol es dueño de un conjunto de archivos (`connector/*` es de A, `master/app/wallet/*` de B,

@@ -111,18 +111,22 @@ def tal_vende(r: local.Resultado, hgw: Contraparte, espera: float) -> None:
 
 def convergencia(r: local.Resultado, swap_id: str) -> None:
     r.paso("El nodo converge")
+    ciclo = local.ciclo_actual()
+
+    def swaps_en_master() -> list:
+        # El swap-settled pasa por el broker y connector antes de llegar a master: se espera.
+        status, detalle = local.master(f"/cycles/{ciclo}")
+        if status != 200:
+            return []
+        return [s for s in detalle.get("swaps", []) if swap_id in json.dumps(s)]
+
+    swaps = local.esperar(swaps_en_master, 30) or []
+    r.chequeo(len(swaps) == 1, "el ciclo muestra el swap una sola vez", json.dumps(swaps)[:200])
     status, saldo = local.master("/wallet/balance-status")
     if status == 200:
         r.info(f"balance oficial en master: {json.dumps(saldo.get('assets'))[:200]}")
     estado_real = local.wallet_admin("GET", "/state")[1]["balances"]["TAL"]
     r.info(f"wallet real de TAL: {json.dumps(estado_real)}")
-    ciclo = local.ciclo_actual()
-    status, detalle = local.master(f"/cycles/{ciclo}")
-    if status == 200:
-        swaps = [s for s in detalle.get("swaps", []) if swap_id in json.dumps(s)]
-        r.chequeo(len(swaps) == 1, "el ciclo muestra el swap una sola vez", json.dumps(swaps)[:200])
-    else:
-        r.info(f"GET /cycles/{ciclo} → {status}")
 
 
 def main() -> None:
@@ -136,7 +140,14 @@ def main() -> None:
     r = local.Resultado("Anomalía 4")
     local.stack_arriba(r)
     local.wallet_admin("POST", "/market", {"kwhEnabled": True})
-    hgw = Contraparte(local.ciclo_actual())
+    if args.operacion == "accept":
+        # TAL compra: hace falta un ciclo con déficit y el mercado abierto.
+        central = local.Broker("central")
+        ciclo = local.mercado_comprador(central, "anomalia4", mercado=args.espera + 30)
+        central.cerrar()
+    else:
+        ciclo = local.ciclo_actual()
+    hgw = Contraparte(ciclo)
     try:
         hgw.vaciar()
         if args.operacion == "accept":

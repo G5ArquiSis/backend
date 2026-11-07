@@ -10,6 +10,8 @@
 | [ai-logs/](ai-logs/) — tabla y un archivo por integrante | RDOC02 | Todos |
 | [adr/](adr/) — AD1, AD2, AD3 y AD5; AD4 y AD6 pendientes; post-mortems después de la demo | RDOC01 | A (AD1), B (AD2, AD5), C (AD4, AD6), D (AD3) |
 | [arquitectura.md](arquitectura.md) — diagrama UML de componentes, cómo correr en local y tests | RDOC03 | E |
+| [comprador.md](comprador.md) — libro de ofertas, motor comprador, verificación del token y aceptación del swap | RF02, RF03, G04 | D |
+| [experimento-span.md](experimento-span.md) — informe del experimento de span | RF06, RDOC05 | D |
 | [ciclo-negociacion.md](ciclo-negociacion.md) — ledger, eventos de la wallet, reconciliación, reporte, API y contrato con `connector` | RF01 a RF05 | B, con A |
 | [monitoreo.md](monitoreo.md) — New Relic: instalación, métricas de la E2, dashboard, alertas y guardián de ciclos | RDOC03, RNF05 | E |
 | [infraestructura.md](infraestructura.md) — runbook de AWS y deploy | RNF04 | E |

@@ -250,6 +250,56 @@ def status_statement(
     )
 
 
+def sin_kwh(central: Broker) -> None:
+    """Deja a TAL como una ciudad con déficit al empezar el ciclo: sin kWh en la cuenta.
+
+    En la central real, el cierre del ciclo anterior quema todos los kWh y manda
+    `imbalance-settlement`; la wallet falsa no cierra ciclos. Sin esto, el comprador ve los kWh
+    que quedaron de otros ensayos, los descuenta del déficit y no puja (que es lo correcto).
+    """
+    cr = wallet_balance("TAL").get("CR", {}).get("available", 0)
+    wallet_admin("POST", "/accounts/TAL", {"kwh": 0})
+    central.a_ciudad(
+        "TAL",
+        mensaje(
+            "imbalance-settlement",
+            {
+                "kwhHeld": 0,
+                "deficit": 0,
+                "coverage": 0,
+                "pricePerEnergy": 45.36,
+                "total": 0,
+                "balanceAfter": cr,
+                "settlementId": f"stl-ensayo-{uuid.uuid4()}",
+            },
+            ciclo="cycle-ensayo-anterior",
+        ),
+    )
+
+
+def mercado_comprador(central: Broker, prefijo: str, mercado: float = 120) -> str:
+    """Ciclo nuevo en que TAL tiene déficit (12 000 kWh), sin kWh en la cuenta, con el mercado
+    abierto `mercado` segundos y una ruta habilitada a HGW. Devuelve el cycleId."""
+    ciclo = ciclo_nuevo(prefijo)
+    sin_kwh(central)
+    central.a_ciudad(
+        "TAL",
+        status_statement(ciclo, mercado=mercado, cierre=120, generacion=8000, consumo=20000),
+    )
+    central.a_ciudad(
+        "TAL",
+        mensaje(
+            "distance-table",
+            {
+                "distances": {"HGW": {"distance": 4500, "transportCost": 0.0034, "enabled": True}},
+                "disabledRouteTransportCost": 0.034,
+            },
+            ciclo=ciclo,
+        ),
+    )
+    return ciclo
+
+
 def ciclo_nuevo(prefijo: str) -> str:
     """Un ciclo propio del ensayo, también como ciclo de la wallet falsa."""
     ciclo = f"cycle-{prefijo}-{int(time.time())}"
