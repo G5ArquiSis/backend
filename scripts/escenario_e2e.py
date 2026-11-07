@@ -119,6 +119,8 @@ def main() -> None:
         r.paso(f"Ciclo {ciclo}: {args.mercado:.0f} s de mercado")
         # TAL vende si genera más de lo que consume; con --tal-compra, al revés.
         generacion, consumo = (8000, 20000) if args.tal_compra else (26000, 13000)
+        if args.tal_compra:
+            local.sin_kwh(central)
         central.a_ciudad(
             "TAL",
             local.status_statement(

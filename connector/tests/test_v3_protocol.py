@@ -3,8 +3,10 @@
 import time
 
 import httpx
+import pytest
 from support import FakeChannel, RecordingMaster, as_body
 
+import consumer
 from config import Settings
 from consumer import (
     SlidingWindowRateLimiter,
@@ -15,6 +17,7 @@ from events import (
     RETIRED_TYPES,
     validacion_mensaje_entrante,
 )
+from heartbeat import CONSUMERS
 
 SETTINGS = Settings(
     broker_host="localhost",
@@ -237,3 +240,81 @@ def test_publish_pending_respects_rate_limit_and_does_not_drop(master_with) -> N
     assert len(channel.published) == 2
     sent_calls = [r[0] for r in master.requests if "/sent" in r[0]]
     assert sent_calls == ["/internal/outbox/1/sent", "/internal/outbox/2/sent"]
+
+
+class FeedChannel(FakeChannel):
+    """Canal que entrega `deliveries` por consume() y después corta el bucle."""
+
+    def __init__(self, deliveries) -> None:
+        super().__init__()
+        self.deliveries = deliveries
+
+    def basic_qos(self, prefetch_count: int) -> None:
+        pass
+
+    def consume(self, queue, inactivity_timeout=None):
+        yield from self.deliveries
+        raise StopFeed
+
+
+class StopFeed(Exception):
+    pass
+
+
+def test_market_consumer_beats_as_mercado(master_with, monkeypatch) -> None:
+    """El consumidor del mercado late como "mercado", el nombre que exige el healthcheck.
+
+    Antes llamaba record_heartbeat() sin nombre: el primer mensaje lanzaba TypeError, el
+    reintento llamaba record_heartbeat("market") (nombre desconocido) y el hilo moría.
+    """
+    beats: list[str] = []
+    monkeypatch.setattr(consumer, "record_heartbeat", beats.append)
+    master = RecordingMaster(
+        {"/internal/messages": httpx.Response(200, json={"outcome": "applied"})}
+    )
+    offer = {"type": "offer", "cycleId": "c", "cityId": "HGW", "data": {"offerId": "HGW-1"}}
+    method = type("Method", (), {"delivery_tag": 7})()
+    channel = FeedChannel([(method, None, as_body(offer)), (None, None, None)])
+
+    with pytest.raises(StopFeed):
+        consumer.serve_market_queue(channel, master_with(master), SETTINGS)
+
+    assert beats == ["mercado", "mercado"]
+    assert channel.acked == [7]
+
+
+def test_market_thread_only_with_market_enabled(monkeypatch) -> None:
+    started: list[str] = []
+
+    class Thread:
+        def __init__(self, target, args, kwargs, daemon):
+            self.name = args[0]
+
+        def start(self) -> None:
+            started.append(self.name)
+
+        def join(self) -> None:
+            pass
+
+    def city_loop(name, *args, **kwargs):
+        started.append(name)
+
+    monkeypatch.setattr(consumer.threading, "Thread", Thread)
+    monkeypatch.setattr(consumer, "consume_forever", city_loop)
+    monkeypatch.setattr(consumer, "MasterClient", lambda: None)
+    monkeypatch.setattr(consumer.signal, "signal", lambda *_: None)
+
+    for enabled, expected in (
+        (False, ["observer", "ciudad"]),
+        (True, ["observer", "mercado", "ciudad"]),
+    ):
+        started.clear()
+        monkeypatch.setattr(
+            consumer,
+            "get_settings",
+            lambda e=enabled: SETTINGS.model_copy(update={"market_enabled": e}),
+        )
+        consumer.main()
+        assert started == expected
+        for name in started:
+            assert name in CONSUMERS

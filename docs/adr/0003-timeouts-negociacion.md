@@ -150,6 +150,24 @@ mismo `idpk`, porque es la misma operación. Una corrección del reporte lleva u
   enunciado. Si la central no la considera ejecutada, el ledger quedaría con una operación de más.
 - El tope de 3 envíos es arbitrario; no hay datos todavía de cuánto tarda la central en responder.
 
+## Anexo E2: los bids del comprador
+
+En la E2 desaparece la `negotiation-proposal`, pero el comprador (rol D) tiene el mismo problema
+con sus `bid`: el vendedor puede no responder, responder tarde o responder dos veces, y master
+puede reiniciarse entre medio. Se aplica la misma decisión, sin mecanismo nuevo
+([comprador.md](../comprador.md)):
+
+- El bid vive en la tabla `market_bids` con un `deadline_at`. El `POST /internal/outbox/claim`
+  de connector sigue siendo el reloj: `buyer_tick` revisa ahí los vencidos.
+- Un bid sin respuesta se reenvía con el **mismo `idpk`** y un `msgId` nuevo; todos los `msgId`
+  quedan en `msg_ids`, así que una respuesta tardía a cualquier envío se reconoce.
+- El plazo ya no es fijo: es el **span** de la estrategia del ciclo (AD6, rol C), y cada bid
+  guarda el que usó. `BID_MAX_ATTEMPTS` (3 por defecto) cumple el papel del tope de envíos.
+- Lo que en la E1 garantizaba el índice único de `ledger_events` acá lo garantiza la
+  Idempotency-Key del accept, fija por bid: aceptar dos veces el mismo swap no es posible
+  aunque se reintente tras un 504 o un reinicio.
+- Las dos réplicas no compran a la vez: `buyer_tick` corre bajo un advisory lock de Postgres.
+
 ## Post-mortem (después de la demo)
 
 Qué pasó en la realidad: qué funcionó, qué no, qué cambiaríamos.

@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     wallet_enabled: bool = False
     wallet_reconcile_interval_seconds: int = Field(default=180, gt=0)
 
+    # Comprador (rol D). Apagado por defecto: además necesita MARKET_ENABLED y
+    # WALLET_ENABLED. El span y la política de selección no van acá: son de la estrategia
+    # del ciclo (app/market/strategy.py, rol C), que se cambia sin redeploy.
+    buyer_enabled: bool = False
+    # Envíos totales de un mismo bid (con el mismo idpk) antes de darlo por vencido.
+    bid_max_attempts: int = Field(default=3, ge=1)
+    # JWKS para verificar el swapToken; por defecto {raíz de la wallet}/.well-known/jwks.json.
+    wallet_jwks_url: str | None = None
+
     # El .env es compartido por los tres containers, así que las variables del
     # broker llegan acá aunque master no las use.
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

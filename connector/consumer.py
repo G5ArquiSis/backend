@@ -113,14 +113,16 @@ def main() -> None:
         observer.join()
         return
 
-    # 2. Hilo para consumidor del feed de mercado (market.{CODE})
-    market_thread = threading.Thread(
-        target=consume_forever,
-        args=("market", settings.city_identity, settings.city_broker_password, settings),
-        kwargs={"serve": lambda channel: serve_market_queue(channel, master, settings)},
-        daemon=True,
-    )
-    market_thread.start()
+    # 2. Hilo para consumidor del feed de mercado (market.{CODE}), solo con MARKET_ENABLED.
+    # El nombre es el del heartbeat ("mercado"): con otro, record_heartbeat lanza y el hilo muere.
+    if settings.market_enabled:
+        market_thread = threading.Thread(
+            target=consume_forever,
+            args=("mercado", settings.city_identity, settings.city_broker_password, settings),
+            kwargs={"serve": lambda channel: serve_market_queue(channel, master, settings)},
+            daemon=True,
+        )
+        market_thread.start()
 
     # 3. La conexión de la ciudad corre en el hilo principal
     consume_forever(
@@ -299,7 +301,7 @@ def serve_market_queue(channel: BlockingChannel, master: MasterClient, settings:
     for method, _properties, body in channel.consume(queue, inactivity_timeout=_IDLE_SECONDS):
         if method is not None:
             handle_market_delivery(channel, method.delivery_tag, body, master, settings)
-        record_heartbeat()
+        record_heartbeat("mercado")
 
 
 def handle_market_delivery(

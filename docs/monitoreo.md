@@ -101,10 +101,21 @@ un ensayo local con la license key no las dispare.
 |---|---|---|
 | Ciclo sin reporte (G03, guardián) | `SELECT count(*) FROM CycleClosed WHERE appName = 'EnergyShark E1' AND owedReport IS TRUE AND reportSent IS FALSE` | > 0 al menos una vez en 5 min |
 | Reloj detenido (guardián) | `SELECT count(*) FROM CycleClosed WHERE appName = 'EnergyShark E1'` | Pérdida de señal tras 45 min (dos ciclos) |
-| Connector no late (guardián) | `SELECT count(*) FROM ContainerSample WHERE name = 'energyshark-e1-connector-1' AND status NOT LIKE '%(healthy)%'` | > 0 en todas las ventanas durante 5 min. Además, pérdida de señal tras 10 min (el contenedor desapareció) |
-| Feed del mercado detenido | `SELECT count(*) FROM InboundMessage WHERE feed = 'market'` | Pérdida de señal tras 10 min. Activarla sólo con `MARKET_ENABLED=true` |
-| Wallet fallando | `SELECT percentage(count(*), WHERE outcome != 'ok') FROM WalletCall` | > 20 % durante 5 min |
-| Wallet lenta | `SELECT percentile(durationMs, 95) FROM WalletCall` | > 5000 ms durante 5 min |
+| Connector no late (guardián) | `SELECT filter(count(*), WHERE status NOT LIKE '%(healthy)%') FROM ContainerSample WHERE name = 'energyshark-e1-connector-1'` | > 0 en todas las ventanas durante 5 min. Además, pérdida de señal tras 10 min (el contenedor desapareció) |
+| Feed del mercado detenido | `SELECT count(*) FROM InboundMessage WHERE appName = 'EnergyShark E1' AND feed = 'market'` | Pérdida de señal tras 10 min. Creada desactivada: activarla al encender `MARKET_ENABLED=true` |
+| Wallet fallando | `SELECT percentage(count(*), WHERE outcome != 'ok') FROM WalletCall WHERE appName = 'EnergyShark E1'` | > 20 % durante 5 min |
+| Wallet lenta | `SELECT percentile(durationMs, 95) FROM WalletCall WHERE appName = 'EnergyShark E1'` | > 5000 ms durante 5 min |
+
+En "Connector no late", `filter(...)` hace que la consulta devuelva 0 mientras connector está
+sano: con `WHERE status NOT LIKE ...` en vez de `filter`, la consulta no tendría datos en
+condiciones normales y la pérdida de señal se dispararía siempre. Así sólo se calla si el
+contenedor desaparece.
+
+**Estado en producción (2026-11-06):** las seis condiciones están en la política
+"EnergyShark E2" (una incidencia por condición) y un workflow avisa por email de todo lo que
+abra esa política. Las condiciones sin pérdida de señal usan ventanas de 60 s con un retraso de
+120 s y cierran una violación abierta a las 24 h. El primer `CycleClosed` llegó tras el deploy
+del PR #29 (`cycle-250009`, reporte debido y enviado).
 
 ### Guardián de ciclos (E6)
 

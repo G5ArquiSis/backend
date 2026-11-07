@@ -37,6 +37,10 @@ async def create_schema() -> None:
     hay datos en producción que preservar.
     """
     async with _engine.begin() as connection:
+        # Las dos réplicas arrancan a la vez: sin este lock, las dos crean la misma tabla
+        # nueva y una muere con UniqueViolation (pg_type). Con él, la segunda espera y
+        # encuentra las tablas ya creadas. Se suelta al terminar la transacción.
+        await connection.execute(text("SELECT pg_advisory_xact_lock(21730001)"))
         await connection.run_sync(Base.metadata.create_all)
 
 
