@@ -740,3 +740,47 @@ async def test_terminal_event_before_http_swap_mapping_is_reconciled(
     assert processed == 1
     assert bid.status == "expired"
     assert offer.remaining == 600
+
+
+async def test_swap_proposal_uses_protocol_asset_codes(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La wallet v3 solo acepta los activos `KWH` y `CR` (referencia API v3, POST /swaps)."""
+    from app.market import swaps
+
+    await open_offer(db)
+    assert await apply_central_message(
+        db, bid_message(quantity=200), NOW + timedelta(seconds=1), SETTINGS
+    ) == APPLIED
+    await db.commit()
+
+    proposals: list[dict[str, Any]] = []
+
+    class RecordingWallet:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "RecordingWallet":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        async def propose_swap(self, **kwargs: Any) -> dict[str, Any]:
+            proposals.append(kwargs)
+            return {"swapId": "swap-asset-codes-001"}
+
+    monkeypatch.setattr(swaps, "WalletClient", RecordingWallet)
+    settings = SETTINGS.model_copy(
+        update={
+            "wallet_enabled": True,
+            "wallet_base_url": "http://wallet.test/v1",
+            "wallet_api_key": "clave-de-prueba",
+        }
+    )
+
+    await swaps.process_reserved_bids(settings)
+
+    assert len(proposals) == 1
+    assert proposals[0]["give"] == {"asset": "KWH", "amount": 200}
+    assert proposals[0]["take"]["asset"] == "CR"
